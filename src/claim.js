@@ -16,7 +16,8 @@
  *   ots: { file: base64|null, calendars: string[], errors: {[cal]: msg}, lastUpgrade: ms },
  * }
  */
-import { signEvent } from './sign.js';
+import { signEvent, generateSecretKey } from './sign.js';
+import { encodeFile, pendingTemplate, finalTemplate, parseOts, pruneToBitcoin, serializeOts } from './ots.js';
 
 export const recordKey = (runId, pubkey) => `${runId}:${pubkey}`;
 
@@ -116,4 +117,45 @@ export function submitStatus(record, targets) {
     submitted: status.run === 'ok' && status.claim === 'ok',
     needsRetry: Object.values(status).some((s) => s !== 'ok') || neverSent,
   };
+}
+
+// ------------------------------------------------------------- the Claim's timestamp proof
+
+const HOUR_MS = 3600 * 1000;
+const UPGRADE_EVERY_MS = 10 * 60 * 1000;
+
+/** Stamping hasn't produced a proof yet (never ran, every calendar failed, or a reload cut it short). */
+export const needsStamp = (record) => !record.ots.file;
+
+/**
+ * Folds a stampDigest result into the record. With a proof and the
+ * claimer's key, also signs the ots-pending carrier so anyone can finish
+ * the proof if this phone never returns.
+ */
+export function withStamp(record, { file, calendars, errors }, key, createdAt) {
+  const ots = { ...record.ots, file: file ? encodeFile(file) : null, calendars, errors };
+  const canSign = file && key?.pubkey === record.claim.pubkey;
+  const pending = canSign ? signEvent(pendingTemplate(record.claim.id, file, createdAt), key.sk) : record.pending;
+  return { ...record, ots, pending };
+}
+
+/** A pending proof is worth asking the calendars about: an hour after the Claim, at most every 10 minutes. */
+export function upgradeDue(record, nowMs) {
+  return Boolean(record.ots.file) && !record.final
+    && nowMs - record.claim.created_at * 1000 >= HOUR_MS
+    && nowMs - record.ots.lastUpgrade >= UPGRADE_EVERY_MS;
+}
+
+/**
+ * Folds an upgraded proof into the record. Once Bitcoin attests, signs the
+ * NIP-03 kind-1040 with a fresh throwaway key, so finishing never depends
+ * on the claimer's key still being on this phone.
+ */
+export function withUpgrade(record, fileBytes, nowMs, relayHint) {
+  const ots = { ...record.ots, file: encodeFile(fileBytes), lastUpgrade: nowMs };
+  if (record.final) return { ...record, ots };
+  const pruned = pruneToBitcoin(parseOts(fileBytes));
+  if (!pruned) return { ...record, ots };
+  const template = finalTemplate(record.claim.id, serializeOts(pruned), relayHint, Math.floor(nowMs / 1000));
+  return { ...record, ots, final: signEvent(template, generateSecretKey()) };
 }
