@@ -314,13 +314,40 @@ export function pruneToBitcoin(stamp) {
 // ------------------------------------------------------------- talking to calendars
 
 const OTS_HEADERS = { Accept: 'application/vnd.opentimestamps.v1' };
+const CALENDAR_TIMEOUT_MS = 10_000;
+
+/**
+ * One calendar request's body, or a throw (HTTP error, network error, or no
+ * answer in timeoutMs). The race covers a fetch or body that ignores the
+ * abort signal, so one stalled calendar never holds up the others.
+ */
+async function fetchBytes(fetchImpl, url, init, timeoutMs) {
+  const abort = new AbortController();
+  let timer;
+  const timedOut = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(`no answer in ${timeoutMs / 1000} s`);
+      abort.abort(err);
+      reject(err);
+    }, timeoutMs);
+  });
+  try {
+    const res = await Promise.race([fetchImpl(url, { ...init, signal: abort.signal }), timedOut]);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return new Uint8Array(await Promise.race([res.arrayBuffer(), timedOut]));
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Stamps a digest (a Claim id, hex) at every calendar in parallel, the way the
  * python client does: digest -> append 16 random bytes -> sha256 -> POST.
  * -> { file: Uint8Array | null, calendars: [urls that answered], errors: { url: message } }
  */
-export async function stampDigest(digestHex, { calendars = CALENDARS, fetchImpl = globalThis.fetch, nonce } = {}) {
+export async function stampDigest(digestHex, {
+  calendars = CALENDARS, fetchImpl = globalThis.fetch, nonce, timeoutMs = CALENDAR_TIMEOUT_MS,
+} = {}) {
   const root = newStamp(hexToBytes(digestHex));
   const salted = { op: { tag: APPEND, arg: nonce ?? crypto.getRandomValues(new Uint8Array(16)) } };
   salted.stamp = newStamp(applyOp(salted.op, root.msg));
@@ -332,13 +359,12 @@ export async function stampDigest(digestHex, { calendars = CALENDARS, fetchImpl 
   const errors = {};
   await Promise.all(calendars.map(async (cal) => {
     try {
-      const res = await fetchImpl(`${cal}/digest`, {
+      const body = await fetchBytes(fetchImpl, `${cal}/digest`, {
         method: 'POST',
         headers: { ...OTS_HEADERS, 'Content-Type': 'application/x-www-form-urlencoded' },
         body: tip.msg,
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      merge(tip, parseTimestamp(new Uint8Array(await res.arrayBuffer()), tip.msg));
+      }, timeoutMs);
+      merge(tip, parseTimestamp(body, tip.msg));
       ok.push(cal);
     } catch (e) {
       errors[cal] = String(e.message || e);
@@ -353,17 +379,18 @@ export async function stampDigest(digestHex, { calendars = CALENDARS, fetchImpl 
  * which a browser sees as a network error (no CORS on 404): both mean "not
  * yet". -> { file: Uint8Array, changed: boolean }
  */
-export async function upgradeOts(fileBytes, { calendars = CALENDARS, fetchImpl = globalThis.fetch } = {}) {
+export async function upgradeOts(fileBytes, {
+  calendars = CALENDARS, fetchImpl = globalThis.fetch, timeoutMs = CALENDAR_TIMEOUT_MS,
+} = {}) {
   const root = parseOts(fileBytes);
   const leaves = [...walk(root)].flatMap((s) =>
     s.attestations.filter((a) => a.type === 'pending' && calendars.includes(a.uri)).map((a) => ({ s, uri: a.uri })));
   let changed = false;
   await Promise.all(leaves.map(async ({ s, uri }) => {
     try {
-      const res = await fetchImpl(`${uri}/timestamp/${bytesToHex(s.msg)}`, { headers: OTS_HEADERS });
-      if (!res.ok) return;
+      const body = await fetchBytes(fetchImpl, `${uri}/timestamp/${bytesToHex(s.msg)}`, { headers: OTS_HEADERS }, timeoutMs);
       const before = serializeTimestamp(s);
-      merge(s, parseTimestamp(new Uint8Array(await res.arrayBuffer()), s.msg));
+      merge(s, parseTimestamp(body, s.msg));
       if (compareBytes(before, serializeTimestamp(s)) !== 0) changed = true;
     } catch { /* not yet */ }
   }));

@@ -230,6 +230,38 @@ test('upgrade: asks each of our calendars for its commitment, merges Bitcoin pat
   assert.equal(hex(again.file), hex(file));
 });
 
+const hang = () => new Promise(() => {});
+
+test('stamping: a calendar that never answers times out as its own error; the others still make the proof', { timeout: 3000 }, async () => {
+  const fetchImpl = async (url) => {
+    if (url.startsWith(ALICE)) return response(unhex(LIVE.responses[ALICE]));
+    if (url.startsWith(FINNEY)) return { ok: true, status: 200, arrayBuffer: hang };
+    return hang();
+  };
+  const r = await stampDigest(CLAIM_ID, { fetchImpl, nonce: NONCE, timeoutMs: 50 });
+  assert.deepEqual(r.calendars, [ALICE]);
+  assert.match(r.errors[CALENDARS[1]], /no answer/);
+  assert.match(r.errors[FINNEY], /no answer/, 'a stalled body times out too');
+  assert.deepEqual(pendingUris(parseOts(r.file)), [ALICE]);
+});
+
+test('upgrade: a calendar that never answers is "not yet", and the others still upgrade', { timeout: 3000 }, async () => {
+  const { file } = await stampLive();
+  const aliceLeaf = (function find(s) {
+    if (s.attestations.some((a) => a.uri === ALICE)) return s;
+    for (const o of s.ops) { const f = find(o.stamp); if (f) return f; }
+    return null;
+  })(parseOts(file));
+  const done = newStamp(aliceLeaf.msg);
+  const block = newStamp(applyOp({ tag: 0x08 }, aliceLeaf.msg));
+  block.attestations.push({ type: 'bitcoin', height: 917000 });
+  done.ops.push({ op: { tag: 0x08 }, stamp: block });
+  const fetchImpl = async (url) => (url.startsWith(ALICE) ? response(serializeTimestamp(done)) : hang());
+  const up = await upgradeOts(file, { fetchImpl, timeoutMs: 50 });
+  assert.equal(up.changed, true);
+  assert.equal(otsStatus(encodeFile(up.file)), 'complete');
+});
+
 test('upgrade: never contacts a calendar outside our list', async () => {
   const stamp = parseOts(TWO);
   const asked = [];
