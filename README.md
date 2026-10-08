@@ -46,7 +46,7 @@ The scanner ignores the host part: a frame decodes the same no matter which base
 | Nostr indexers | kind-0 lookups for a pasted key; a generated key's kind-0 also goes here | `src/relay.js` `INDEXERS` = `wss://purplepag.es`, `wss://user.kindpag.es` |
 | nostr-leaderboard | Claim (it ranks Claims, not built here) | kind 8064, `created_at` = Submit time, content `""`, tags `["t","ag-lb"]`, `["t","claim"]`, `["e",<run id>,<RELAYS[0]>,<run pubkey>]`, `["p",<run pubkey>]`, `["sig",<run sig>]`. Never `t=sm64` or `n`. `src/claim.js` |
 | nostr-leaderboard | pending timestamp proof | kind 8064, tags `["t","ag-lb"]`, `["t","ots-pending"]`, `["e",<claim id>]`, content = base64 `.ots` stamping the Claim id, signed by the claimer. Lets anyone finish the proof. `src/ots.js` |
-| NIP-03 | finished timestamp proof | kind 1040, tags `["e",<claim id>,<RELAYS[0]>]`, `["k","8064"]`, content = base64 `.ots` pruned to its Bitcoin attestations (every calendar's, not one), signed by a throwaway key. `src/ots.js` |
+| NIP-03 | finished timestamp proof | kind 1040, tags `["e",<claim id>,<RELAYS[0]>]`, `["k","8064"]`, content = base64 `.ots` pruned to its Bitcoin attestations (every calendar's, not one), signed by a throwaway key; published once every calendar that stamped the Claim attests in Bitcoin, or 24 h after the first does. `src/ots.js`, `src/claim.js` |
 | OpenTimestamps | calendars | `src/ots.js` `CALENDARS` = alice, bob, finney (all three send CORS). `.ots` format as python-opentimestamps writes it |
 | nostr-leaderboard | acceptance rules | `src/verify.js` mirrors its `verify.js` + `model.js` `parseRun` |
 | nostr-leaderboard | star names, time format | `src/stars.js`, copied from its `src/stars.js` |

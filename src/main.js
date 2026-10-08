@@ -22,7 +22,7 @@ import {
   parseIdentityInput, validateName, generatedKey, pastedKey, renameKey, newestProfile, profileName, keyLabel, shortNpub,
 } from './identity.js';
 import {
-  recordKey, startRecord, destinations, plan, applyResults, submitStatus, needsStamp, withStamp, withCarrier, upgradeDue, withUpgrade,
+  recordKey, startRecord, destinations, plan, applyResults, submitStatus, needsStamp, withStamp, withCarrier, upgradeDue, withUpgrade, finalWait,
 } from './claim.js';
 import { stampDigest, upgradeOts, otsStatus, decodeFile, parseOts, bitcoinHeights } from './ots.js';
 
@@ -313,7 +313,12 @@ function otsLine(record, rk) {
       + (carrier ? `. ${carrier}` : ', and so can anyone holding the published pending proof.');
   }
   const heights = bitcoinHeights(parseOts(decodeFile(record.ots.file)));
-  return `Timestamp confirmed in Bitcoin block ${Math.min(...heights)}.${carrier ? ` ${carrier}` : ''}`;
+  const wait = finalWait(record);
+  const waiting = wait?.waiting.length
+    ? ` ${wait.attested.length ? `Confirmed by ${wait.attested.map(calendarName).join(', ')}; waiting` : 'Waiting'} for ${wait.waiting.map(calendarName).join(', ')}`
+      + ` (until ${new Date(wait.until).toLocaleString()}) before publishing the Bitcoin proof, so it carries every calendar's time.`
+    : '';
+  return `Timestamp confirmed in Bitcoin block ${Math.min(...heights)}.${waiting}${carrier ? ` ${carrier}` : ''}`;
 }
 
 // ---- My claims

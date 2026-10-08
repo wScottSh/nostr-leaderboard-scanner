@@ -294,6 +294,15 @@ const attestations = (stamp) => [...walk(stamp)].flatMap((s) => s.attestations.m
 
 export const bitcoinHeights = (stamp) => attestations(stamp).filter((a) => a.type === 'bitcoin').map((a) => a.height);
 
+/** Calendars whose pending commitment has since gained a Bitcoin attestation beneath it. */
+export function bitcoinCalendars(stamp) {
+  const uris = new Set();
+  for (const s of walk(stamp)) {
+    for (const a of s.attestations) if (a.type === 'pending' && bitcoinHeights(s).length) uris.add(a.uri);
+  }
+  return [...uris];
+}
+
 /** 'none' (no proof), 'pending' (calendars only), or 'complete' (Bitcoin attests). */
 export function otsStatus(fileB64) {
   if (!fileB64) return 'none';

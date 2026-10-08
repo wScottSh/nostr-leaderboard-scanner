@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import {
-  claimTemplate, startRecord, plan, applyResults, submitStatus, recordKey, needsStamp, withStamp, withCarrier, upgradeDue, withUpgrade,
+  claimTemplate, startRecord, plan, applyResults, submitStatus, recordKey, needsStamp, withStamp, withCarrier, upgradeDue, withUpgrade, finalWait,
 } from '../src/claim.js';
 import { newStamp, applyOp, serializeOts, parseOts, bitcoinHeights, otsStatus } from '../src/ots.js';
 import { openStore, setKey, putRecord, findRecord, recordsFor } from '../src/store.js';
@@ -298,4 +298,56 @@ test('upgraded: a Bitcoin attestation yields a NIP-03 1040 of the pruned proof, 
 
   assert.equal(withUpgrade(done, proofFor(record.claim.id, { bitcoin: 917000 }), 9999999, RELAYS[0]).final, final);
   assert.deepEqual(plan(done, TARGETS).filter((p) => p.event === final).map((p) => p.relay), RELAYS);
+});
+
+const ALICE = 'https://alice.btc.calendar.opentimestamps.org';
+const BOB = 'https://bob.btc.calendar.opentimestamps.org';
+
+/** A stamped proof forking into one pending leaf per calendar; a height puts a Bitcoin attestation under that leaf. */
+const calendarProof = (claimId, heights) => {
+  const root = newStamp(new Uint8Array(Buffer.from(claimId, 'hex')));
+  Object.entries(heights).forEach(([uri, height], i) => {
+    const op = { tag: 0xf0, arg: new Uint8Array([i]) };
+    const leaf = newStamp(applyOp(op, root.msg));
+    leaf.attestations.push({ type: 'pending', uri });
+    if (height) {
+      const btc = newStamp(applyOp({ tag: 0x08 }, leaf.msg));
+      btc.attestations.push({ type: 'bitcoin', height });
+      leaf.ops.push({ op: { tag: 0x08 }, stamp: btc });
+    }
+    root.ops.push({ op, stamp: leaf });
+  });
+  return serializeOts(root);
+};
+
+test('k-of-n: the 1040 waits until every stamping calendar attests in Bitcoin, then carries every branch', () => {
+  const key = generatedKey('Mario', 1);
+  const t0 = 1800000000 * 1000;
+  const base = startRecord(RUN, key, 2, RELAYS[0]);
+  const record = withStamp(base, { file: calendarProof(base.claim.id, { [ALICE]: 0, [BOB]: 0 }), calendars: [ALICE, BOB], errors: {} }, key, 3);
+
+  const oneIn = withUpgrade(record, calendarProof(record.claim.id, { [ALICE]: 917000, [BOB]: 0 }), t0, RELAYS[0]);
+  assert.equal(oneIn.final, null, 'one calendar in Bitcoin is not enough while another may follow');
+  assert.equal(oneIn.ots.bitcoinSeenAt, t0);
+  assert.deepEqual(finalWait(oneIn), { attested: [ALICE], waiting: [BOB], until: t0 + 24 * 3600 * 1000 });
+  assert.equal(upgradeDue(oneIn, t0 + 600 * 1000), true, 'keeps asking the calendars');
+
+  const later = withUpgrade(oneIn, calendarProof(record.claim.id, { [ALICE]: 917000, [BOB]: 0 }), t0 + 3600 * 1000, RELAYS[0]);
+  assert.equal(later.ots.bitcoinSeenAt, t0, 'first sighting is kept');
+
+  const both = withUpgrade(later, calendarProof(record.claim.id, { [ALICE]: 917000, [BOB]: 917001 }), t0 + 7200 * 1000, RELAYS[0]);
+  assert.deepEqual(bitcoinHeights(parseOts(Buffer.from(both.final.content, 'base64'))).sort(), [917000, 917001]);
+  assert.equal(finalWait(both), null);
+});
+
+test('k-of-n: 24 h after the first Bitcoin attestation, the 1040 goes out with what is there', () => {
+  const key = generatedKey('Mario', 1);
+  const t0 = 1800000000 * 1000;
+  const base = startRecord(RUN, key, 2, RELAYS[0]);
+  const record = withStamp(base, { file: calendarProof(base.claim.id, { [ALICE]: 0, [BOB]: 0 }), calendars: [ALICE, BOB], errors: {} }, key, 3);
+  const aliceOnly = calendarProof(record.claim.id, { [ALICE]: 917000, [BOB]: 0 });
+  const oneIn = withUpgrade(record, aliceOnly, t0, RELAYS[0]);
+  assert.equal(withUpgrade(oneIn, aliceOnly, t0 + 24 * 3600 * 1000 - 1, RELAYS[0]).final, null);
+  const timedOut = withUpgrade(oneIn, aliceOnly, t0 + 24 * 3600 * 1000, RELAYS[0]);
+  assert.deepEqual(bitcoinHeights(parseOts(Buffer.from(timedOut.final.content, 'base64'))), [917000]);
 });

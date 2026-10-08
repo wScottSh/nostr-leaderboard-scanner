@@ -13,11 +13,14 @@
  *   pending,                  ots-pending carrier, once stamped and signed by the claimer key
  *   final,                    NIP-03 kind-1040, once Bitcoin attests
  *   sends: { [eventId]: { [relay]: { state: 'ok'|'error', message } } },   absent = not yet sent
- *   ots: { file: base64|null, calendars: string[], errors: {[cal]: msg}, lastUpgrade: ms },
+ *   ots: { file: base64|null, calendars: string[], errors: {[cal]: msg}, lastUpgrade: ms,
+ *          bitcoinSeenAt: ms|undefined   when an upgrade first found a Bitcoin attestation },
  * }
  */
 import { signEvent, generateSecretKey } from './sign.js';
-import { encodeFile, decodeFile, pendingTemplate, finalTemplate, parseOts, pruneToBitcoin, serializeOts } from './ots.js';
+import {
+  encodeFile, decodeFile, pendingTemplate, finalTemplate, parseOts, pruneToBitcoin, serializeOts, bitcoinHeights, bitcoinCalendars,
+} from './ots.js';
 
 export const recordKey = (runId, pubkey) => `${runId}:${pubkey}`;
 
@@ -130,6 +133,7 @@ export function submitStatus(record, targets) {
 // ------------------------------------------------------------- the Claim's timestamp proof
 
 const HOUR_MS = 3600 * 1000;
+const FINAL_WAIT_MS = 24 * HOUR_MS;
 const UPGRADE_EVERY_MS = 10 * 60 * 1000;
 
 /** Stamping hasn't produced a proof yet (never ran, every calendar failed, or a reload cut it short). */
@@ -166,15 +170,40 @@ export function upgradeDue(record, nowMs) {
 }
 
 /**
- * Folds an upgraded proof into the record. Once Bitcoin attests, signs the
- * NIP-03 kind-1040 with a fresh throwaway key, so finishing never depends
- * on the claimer's key still being on this phone.
+ * While some Bitcoin attestation is in but no 1040 yet: which stamping
+ * calendars have attested, which are still awaited, and when the wait ends
+ * regardless. Else null.
+ */
+export function finalWait(record) {
+  if (record.final || !record.ots.bitcoinSeenAt) return null;
+  return waitFor(parseOts(decodeFile(record.ots.file)), record.ots.calendars, record.ots.bitcoinSeenAt);
+}
+
+function waitFor(stamp, calendars, seenAt) {
+  const attested = bitcoinCalendars(stamp);
+  return {
+    attested: calendars.filter((c) => attested.includes(c)),
+    waiting: calendars.filter((c) => !attested.includes(c)),
+    until: seenAt + FINAL_WAIT_MS,
+  };
+}
+
+/**
+ * Folds an upgraded proof into the record. The NIP-03 kind-1040 waits until
+ * every calendar that stamped the Claim attests in Bitcoin, or 24 h after
+ * the first one did: the leaderboard compares k-of-n calendar times, so a
+ * 1040 carrying only the first calendar's branch would throw the rest away.
+ * It is signed with a fresh throwaway key, so finishing never depends on
+ * the claimer's key still being on this phone.
  */
 export function withUpgrade(record, fileBytes, nowMs, relayHint) {
   const ots = { ...record.ots, file: encodeFile(fileBytes), lastUpgrade: nowMs };
   if (record.final) return { ...record, ots };
-  const pruned = pruneToBitcoin(parseOts(fileBytes));
-  if (!pruned) return { ...record, ots };
-  const template = finalTemplate(record.claim.id, serializeOts(pruned), relayHint, Math.floor(nowMs / 1000));
+  const stamp = parseOts(fileBytes);
+  if (!bitcoinHeights(stamp).length) return { ...record, ots };
+  ots.bitcoinSeenAt = record.ots.bitcoinSeenAt ?? nowMs;
+  const { waiting, until } = waitFor(stamp, ots.calendars, ots.bitcoinSeenAt);
+  if (waiting.length && nowMs < until) return { ...record, ots };
+  const template = finalTemplate(record.claim.id, serializeOts(pruneToBitcoin(stamp)), relayHint, Math.floor(nowMs / 1000));
   return { ...record, ots, final: signEvent(template, generateSecretKey()) };
 }
