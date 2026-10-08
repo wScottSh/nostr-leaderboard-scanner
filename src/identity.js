@@ -1,11 +1,13 @@
 /*
- * identity.js -- who is submitting. Pure: parses the "Name or nsec" field,
- * enforces the name rules, encodes npubs, and reads names out of kind-0
- * profiles. Key derivation and signing live in sign.js.
+ * identity.js -- who is submitting: parses the "Name or nsec" field,
+ * enforces the name rules, reads names out of kind-0 profiles, and builds
+ * the stored key (generated or pasted). Keys and signatures come from
+ * sign.js.
  */
 import { bech32 } from '@scure/base';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 import { verifyEvent } from './verify.js';
+import { generateSecretKey, pubkeyOf, signEvent } from './sign.js';
 
 export const NAME_MAX = 32;
 
@@ -92,4 +94,21 @@ export function profileName(ev) {
 /** What to call a stored key on screen. */
 export function keyLabel(key) {
   return key.name || shortNpub(key.pubkey);
+}
+
+/** A key made on this phone for a name; its kind-0 goes out with the next Submit. */
+export function generatedKey(name, createdAt) {
+  const sk = generateSecretKey();
+  return renameKey({ sk, pubkey: pubkeyOf(sk), origin: 'generated', name: null, profile: null }, name, createdAt);
+}
+
+/** Re-signs a generated key's kind-0, always newer than the one it replaces. */
+export function renameKey(key, name, createdAt) {
+  const at = Math.max(createdAt, (key.profile?.created_at ?? 0) + 1);
+  return { ...key, name, profile: signEvent(profileTemplate(name, at), key.sk) };
+}
+
+/** A pasted key. name is whatever its own kind-0 says (or null); nothing is published for it. */
+export function pastedKey(sk, name) {
+  return { sk, pubkey: pubkeyOf(sk), origin: 'pasted', name, profile: null };
 }
