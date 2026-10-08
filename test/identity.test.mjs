@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
+import { bech32 } from '@scure/base';
 import { validateName, parseIdentityInput, npubOf, newestProfile, profileName, profileTemplate } from '../src/identity.js';
 import { signEvent, pubkeyOf, generateSecretKey } from '../src/sign.js';
 import { decodeEvent } from '../src/decode.js';
@@ -60,6 +61,16 @@ test('identity input: an npub is refused with a pointer to the nsec', () => {
 test('identity input: a mangled nsec is invalid, never treated as a name', () => {
   assert.equal(parseIdentityInput(NSEC.slice(0, -1)).kind, 'invalid');
   assert.equal(parseIdentityInput(NSEC.slice(0, -1) + 'q').kind, 'invalid', 'checksum');
+});
+
+test('identity input: an nsec outside the curve order is invalid, not a key that throws later', () => {
+  const nsecOf = (hex) => bech32.encode('nsec', bech32.toWords(Uint8Array.from(Buffer.from(hex, 'hex'))));
+  const ORDER = 'fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141';
+  for (const hex of ['00'.repeat(32), ORDER, 'ff'.repeat(32)]) {
+    const parsed = parseIdentityInput(nsecOf(hex));
+    assert.equal(parsed.kind, 'invalid', hex);
+    assert.match(parsed.error, /nsec/);
+  }
 });
 
 test('identity input: anything else is a name under the name rules', () => {

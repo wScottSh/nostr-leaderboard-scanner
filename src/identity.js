@@ -38,9 +38,11 @@ export function parseIdentityInput(raw) {
   }
   if (lower.startsWith('nsec1')) {
     try {
-      return { kind: 'nsec', sk: decodeBech32Key('nsec', lower) };
+      const sk = decodeBech32Key('nsec', lower);
+      pubkeyOf(sk); // throws for a scalar outside the curve order (all-zero, >= n)
+      return { kind: 'nsec', sk };
     } catch {
-      return { kind: 'invalid', error: 'That nsec doesn’t decode. Check it was pasted whole.' };
+      return { kind: 'invalid', error: 'That nsec isn’t a valid key. Check it was pasted whole.' };
     }
   }
   const v = validateName(text);

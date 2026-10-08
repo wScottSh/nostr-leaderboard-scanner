@@ -146,7 +146,7 @@ function renderSubmit(run) {
 }
 
 // Identity-field state lives here while the Submit screen is up.
-let identity = { input: '', parsed: null, lookup: null, confirmForget: false, renaming: false, nameError: '' };
+let identity = { input: '', parsed: null, lookup: null, confirmForget: false, renaming: false, nameError: '', submitError: '' };
 
 function renderIdentity() {
   const box = document.getElementById('identity');
@@ -168,6 +168,7 @@ function renderIdentity() {
   const hasClaims = recordsFor(store.get(), key.pubkey).length > 0;
   box.innerHTML = `
     <div class="actions"><button data-action="submit">${esc(keyLabel(key))} · Submit</button></div>
+    ${identity.submitError ? `<p class="bad-text">${esc(identity.submitError)}</p>` : ''}
     <p class="fine"><button class="link" data-action="forget">Not you?</button>
       ${key.origin === 'generated' ? ' · <button class="link" data-action="rename">Change name</button>' : ''}</p>
     ${identity.confirmForget && key.origin === 'generated' && hasClaims ? `
@@ -184,6 +185,7 @@ function renderIdentity() {
 
 function onIdentityInput(value) {
   identity.input = value;
+  identity.submitError = '';
   identity.parsed = value.trim() ? parseIdentityInput(value) : null;
   const p = identity.parsed;
   if (p?.kind === 'nsec' && identity.lookup?.sk !== p.sk) lookupName(p.sk);
@@ -196,23 +198,30 @@ function updateIdentityMessage() {
   const button = document.getElementById('submit');
   if (!msg || !button) return;
   const p = identity.parsed;
-  msg.innerHTML = !p ? ''
+  msg.innerHTML = identity.submitError ? `<span class="bad-text">${esc(identity.submitError)}</span>`
+    : !p ? ''
     : p.kind === 'invalid' ? `<span class="bad-text">${esc(p.error)}</span>`
     : p.kind === 'name' ? `A key for <strong>${esc(p.name)}</strong> is made on this phone and remembered here.`
     : identity.lookup?.pending ? 'Looking up your name…'
+    : identity.lookup?.error ? `<span class="bad-text">${esc(identity.lookup.error)}</span>`
     : `✓ ${esc(identity.lookup?.name ?? shortNpub(identity.lookup?.pubkey ?? ''))}`;
   button.disabled = !p || p.kind === 'invalid';
 }
 
 async function lookupName(sk) {
-  const pubkey = pastedKey(sk, null).pubkey;
-  identity.lookup = { sk, pubkey, pending: true, name: null };
-  const events = await fetchEvents([...INDEXERS, ...RELAYS], { kinds: [0], authors: [pubkey] });
-  const name = profileName(newestProfile(events, pubkey));
-  if (identity.lookup?.sk === sk) identity.lookup = { sk, pubkey, pending: false, name };
-  // The player may have tapped Submit before the lookup finished.
-  const key = store.get().key;
-  if (key?.pubkey === pubkey && key.origin === 'pasted' && !key.name && name) store.update((s) => setKey(s, { ...key, name }));
+  identity.lookup = { sk, pubkey: null, pending: true, name: null };
+  try {
+    const pubkey = pastedKey(sk, null).pubkey;
+    identity.lookup.pubkey = pubkey;
+    const events = await fetchEvents([...INDEXERS, ...RELAYS], { kinds: [0], authors: [pubkey] });
+    const name = profileName(newestProfile(events, pubkey));
+    if (identity.lookup?.sk === sk) identity.lookup = { sk, pubkey, pending: false, name };
+    // The player may have tapped Submit before the lookup finished.
+    const key = store.get().key;
+    if (key?.pubkey === pubkey && key.origin === 'pasted' && !key.name && name) store.update((s) => setKey(s, { ...key, name }));
+  } catch (e) {
+    if (identity.lookup?.sk === sk) identity.lookup = { sk, pubkey: null, pending: false, name: null, error: `Couldn’t use that key: ${e.message || e}` };
+  }
   updateIdentityMessage();
 }
 
@@ -356,6 +365,17 @@ function redraw() {
 // ---------------------------------------------------------------- Submit
 
 function submit(run) {
+  identity.submitError = '';
+  try {
+    startSubmit(run);
+  } catch (e) {
+    identity.submitError = `Couldn’t submit: ${e.message || e}`;
+    if (view.name === 'submit') renderIdentity();
+    else renderIdle(identity.submitError);
+  }
+}
+
+function startSubmit(run) {
   let key = store.get().key;
   if (!key) {
     const p = identity.parsed;
@@ -446,7 +466,7 @@ function download(rk) {
 // ---------------------------------------------------------------- identity actions
 
 function forgetKey() {
-  identity = { input: '', parsed: null, lookup: null, confirmForget: false, renaming: false, nameError: '' };
+  identity = { input: '', parsed: null, lookup: null, confirmForget: false, renaming: false, nameError: '', submitError: '' };
   store.update((s) => setKey(s, null));
   renderIdentity();
 }
