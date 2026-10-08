@@ -1,0 +1,23 @@
+# One finalizer pass: finish the Bitcoin timestamps of recent Claims from the
+# leaderboard relays (finalizer/run.mjs). Started by qrgo-finalizer.timer.
+[Unit]
+Description=qrgo.fyi finalizer: finish Claims' Bitcoin timestamps
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=qrgo
+Group=qrgo
+StateDirectory=qrgo-finalizer
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/qrgo-finalizer
+Environment=FINALIZER_KEY_FILE=/var/lib/qrgo-finalizer/key.hex
+ExecStart=/opt/node/bin/node --max-old-space-size=96 /opt/qrgo-finalizer/finalizer.mjs
+TimeoutStartSec=4min
+MemoryMax=128M
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true

@@ -5,10 +5,12 @@
   "description": "Phone scanner for sm64-nostr cabinet star QRs; submits the signed run and the player's Claim to nostr-leaderboard's relays.",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "build:finalizer": "esbuild finalizer/run.mjs --bundle --platform=node --format=esm --target=node22 --minify --outfile=dist-finalizer/finalizer.mjs",
     "dev": "node scripts/build.mjs --serve",
     "test": "node --test test/*.test.mjs",
     "sync-contract": "node scripts/sync-contract.mjs",
-    "e2e": "node test/e2e/submit.e2e.mjs"
+    "e2e": "node test/e2e/submit.e2e.mjs",
+    "finalize": "node finalizer/run.mjs"
   },
   "dependencies": {
     "@noble/curves": "^2.4.0",
