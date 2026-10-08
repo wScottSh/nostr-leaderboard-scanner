@@ -292,7 +292,7 @@ function publishSummary(record, rk) {
   if (canWalkAway(record, TARGETS, stamping.has(rk))) {
     const dup = Object.values(record.sends[record.run.id] ?? {}).some((c) => c.state === 'ok' && c.message.startsWith('duplicate'));
     return 'Done. You can close this page. Your Bitcoin timestamp finishes on its own in a few hours.'
-      + `${dup ? ' A relay already had this Run (maybe someone submitted it first); your Claim is what makes it yours.' : ''}`;
+      + (dup ? ' A relay already had this Run (maybe someone submitted it first); your Claim is what makes it yours.' : '');
   }
   if (isBusy(rk)) return 'Saving… keep this page open a few seconds.';
   const missing = [status.run !== 'ok' && 'the Run', status.claim !== 'ok' && 'your Claim', status.pending && status.pending !== 'ok' && 'the timestamp request']
