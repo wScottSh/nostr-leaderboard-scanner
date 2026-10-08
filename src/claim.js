@@ -10,14 +10,14 @@
  * ClaimRecord = {
  *   run, claim,               the cabinet's Run (verbatim) and the player's Claim
  *   profile,                  kind-0 of a key generated here, else null
- *   pending,                  ots-pending carrier, once stamping succeeds
+ *   pending,                  ots-pending carrier, once stamped and signed by the claimer key
  *   final,                    NIP-03 kind-1040, once Bitcoin attests
  *   sends: { [eventId]: { [relay]: { state: 'ok'|'error', message } } },   absent = not yet sent
  *   ots: { file: base64|null, calendars: string[], errors: {[cal]: msg}, lastUpgrade: ms },
  * }
  */
 import { signEvent, generateSecretKey } from './sign.js';
-import { encodeFile, pendingTemplate, finalTemplate, parseOts, pruneToBitcoin, serializeOts } from './ots.js';
+import { encodeFile, decodeFile, pendingTemplate, finalTemplate, parseOts, pruneToBitcoin, serializeOts } from './ots.js';
 
 export const recordKey = (runId, pubkey) => `${runId}:${pubkey}`;
 
@@ -105,17 +105,25 @@ export function eventStatus(record, eventId, relays) {
  * submitted: the Run and the Claim each sit on at least one relay (the Run
  * counts even when a relay already had it: someone else may have submitted
  * it, the Claim is what's yours).
- * needsRetry: some event no relay holds yet, or some pair was never sent
+ * relaysOwed: some event no relay holds yet, or some pair was never sent
  * (a reload cut the Submit short).
+ * stampOwed / carrierOwed: see needsStamp / carrierOwed.
+ * needsRetry: any of the three; the record isn't finished.
  */
 export function submitStatus(record, targets) {
   const dests = destinations(record, targets);
   const status = Object.fromEntries(dests.map(({ role, event, relays }) => [role, eventStatus(record, event.id, relays)]));
   const neverSent = dests.some(({ event, relays }) => relays.some((r) => !cell(record, event.id, r)));
+  const relaysOwed = Object.values(status).some((s) => s !== 'ok') || neverSent;
+  const stampOwed = needsStamp(record);
+  const owesCarrier = carrierOwed(record);
   return {
     status,
     submitted: status.run === 'ok' && status.claim === 'ok',
-    needsRetry: Object.values(status).some((s) => s !== 'ok') || neverSent,
+    relaysOwed,
+    stampOwed,
+    carrierOwed: owesCarrier,
+    needsRetry: relaysOwed || stampOwed || owesCarrier,
   };
 }
 
@@ -128,15 +136,26 @@ const UPGRADE_EVERY_MS = 10 * 60 * 1000;
 export const needsStamp = (record) => !record.ots.file;
 
 /**
- * Folds a stampDigest result into the record. With a proof and the
- * claimer's key, also signs the ots-pending carrier so anyone can finish
- * the proof if this phone never returns.
+ * There is a proof but no ots-pending carrier for it yet (it was stamped
+ * while another key was active), and no 1040 has made the carrier moot.
+ * Only the claimer's key can sign it.
+ */
+export const carrierOwed = (record) => Boolean(record.ots.file) && !record.pending && !record.final;
+
+/** Signs the owed ots-pending carrier if key is the claimer's; otherwise the record is returned unchanged. */
+export function withCarrier(record, key, createdAt) {
+  if (!carrierOwed(record) || key?.pubkey !== record.claim.pubkey) return record;
+  return { ...record, pending: signEvent(pendingTemplate(record.claim.id, decodeFile(record.ots.file), createdAt), key.sk) };
+}
+
+/**
+ * Folds a stampDigest result into the record and, with the claimer's key,
+ * signs the ots-pending carrier so anyone can finish the proof if this
+ * phone never returns.
  */
 export function withStamp(record, { file, calendars, errors }, key, createdAt) {
   const ots = { ...record.ots, file: file ? encodeFile(file) : null, calendars, errors };
-  const canSign = file && key?.pubkey === record.claim.pubkey;
-  const pending = canSign ? signEvent(pendingTemplate(record.claim.id, file, createdAt), key.sk) : record.pending;
-  return { ...record, ots, pending };
+  return withCarrier({ ...record, ots }, key, createdAt);
 }
 
 /** A pending proof is worth asking the calendars about: an hour after the Claim, at most every 10 minutes. */

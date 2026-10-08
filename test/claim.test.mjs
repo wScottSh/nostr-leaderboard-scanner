@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import {
-  claimTemplate, startRecord, plan, applyResults, submitStatus, recordKey, needsStamp, withStamp, upgradeDue, withUpgrade,
+  claimTemplate, startRecord, plan, applyResults, submitStatus, recordKey, needsStamp, withStamp, withCarrier, upgradeDue, withUpgrade,
 } from '../src/claim.js';
 import { newStamp, applyOp, serializeOts, parseOts, bitcoinHeights, otsStatus } from '../src/ots.js';
 import { openStore, setKey, putRecord, findRecord, recordsFor } from '../src/store.js';
@@ -155,8 +155,13 @@ test('reload mid-Submit: unsent pairs are still owed, and finishing them converg
   const done = applyResults(record, answer(owed, ok));
   assert.deepEqual(plan(done, TARGETS), []);
   assert.deepEqual(submitStatus(done, TARGETS), {
-    status: { profile: 'ok', run: 'ok', claim: 'ok' }, submitted: true, needsRetry: false,
-  });
+    status: { profile: 'ok', run: 'ok', claim: 'ok' },
+    submitted: true,
+    relaysOwed: false,
+    stampOwed: true,
+    carrierOwed: false,
+    needsRetry: true,
+  }, 'every relay has it, but the Claim still owes a timestamp');
 });
 
 // ------------------------------------------------------------- store and keys
@@ -225,12 +230,39 @@ test('stamped: the ots-pending carrier is signed by the claimer and joins the pu
   assert.equal(needsStamp(otherKey), false);
 });
 
+test('stamped while another key is active: the carrier stays owed until the claimer key signs it', () => {
+  const claimer = generatedKey('Mario', 1);
+  const record = startRecord(RUN, claimer, 2, RELAYS[0]);
+  const sent = applyResults(record, answer(plan(record, TARGETS), ok));
+  const file = proofFor(record.claim.id, {});
+  const stamped = withStamp(sent, { file, calendars: ['https://alice'], errors: {} }, generatedKey('Luigi', 1), 3);
+  assert.equal(stamped.pending, null);
+  assert.equal(stamped.ots.file !== null, true, 'the proof is kept');
+  const owed = submitStatus(stamped, TARGETS);
+  assert.equal(owed.carrierOwed, true);
+  assert.equal(owed.needsRetry, true, 'an unsigned carrier is unfinished work');
+
+  assert.equal(withCarrier(stamped, generatedKey('Luigi', 1), 4), stamped, 'only the claimer can sign it');
+  assert.equal(withCarrier(stamped, null, 4), stamped);
+
+  const signed = withCarrier(stamped, claimer, 4);
+  assert.equal(signed.pending.pubkey, claimer.pubkey);
+  assert.equal(signed.pending.content, stamped.ots.file);
+  assert.equal(verifyEvent(signed.pending), true);
+  assert.equal(submitStatus(signed, TARGETS).carrierOwed, false);
+  assert.deepEqual(plan(signed, TARGETS).map((p) => [p.event.id, p.relay]), RELAYS.map((r) => [signed.pending.id, r]));
+  assert.equal(withCarrier(signed, claimer, 9), signed, 'signed once');
+});
+
 test('stamping failed everywhere: no proof, errors kept, still owed a stamp', () => {
   const key = generatedKey('Mario', 1);
   const record = withStamp(startRecord(RUN, key, 2, RELAYS[0]), { file: null, calendars: [], errors: { a: 'x' } }, key, 3);
   assert.equal(record.pending, null);
   assert.equal(needsStamp(record), true);
   assert.deepEqual(record.ots.errors, { a: 'x' });
+  const sent = applyResults(record, answer(plan(record, TARGETS), ok));
+  assert.equal(submitStatus(sent, TARGETS).relaysOwed, false);
+  assert.equal(submitStatus(sent, TARGETS).needsRetry, true, 'a failed stamp is unfinished work');
 });
 
 test('upgrade timing: an hour after the Claim, at most every 10 minutes, never after the 1040 exists', () => {

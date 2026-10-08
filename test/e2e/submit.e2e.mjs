@@ -224,6 +224,32 @@ try {
   assert.ok(!indexer.received.some(({ ev }) => ev.pubkey === pubkeyOf(otherSk)));
   log('claimed as:', (await phone2.locator('#live p').first().textContent()).replace(/\s+/g, ' ').trim(), `(${npubOf(pubkeyOf(otherSk)).slice(0, 12)}…)`);
 
+  console.log('6. a proof stamped while another key was active: published once the claimer key is back');
+  const peach = pubkeyOf(otherSk);
+  const peachPendings = () => relay.received.filter(({ ev }) => ev.pubkey === peach && ev.tags.some((t) => t[1] === 'ots-pending'));
+  await waitFor('Peach’s first ots-pending', () => peachPendings().length === 1, 45000);
+  const STATE = 'nostr-leaderboard-scanner';
+  const state = JSON.parse(await phone2.evaluate((k) => localStorage.getItem(k), STATE));
+  const peachKey = state.key;
+  const [peachRecord] = Object.values(state.claims);
+  delete peachRecord.sends[peachRecord.pending.id];
+  peachRecord.pending = null;
+  await phone2.evaluate(([k, v]) => localStorage.setItem(k, v), [STATE, JSON.stringify({ ...state, key: null })]);
+  await phone2.goto(base);
+  await phone2.getByText('1 unfinished').waitFor();
+  await phone2.getByRole('button', { name: 'My claims (1)' }).click();
+  await phone2.locator('.claim').getByText('needs npub1').waitFor();
+  assert.equal(await phone2.locator('.claim [data-action="retry"]').count(), 0, 'no Retry that could not do anything');
+  assert.equal(peachPendings().length, 1, 'nothing signed without the claimer key');
+  await phone2.evaluate(([k, v]) => localStorage.setItem(k, v), [STATE, JSON.stringify({ ...state, key: peachKey })]);
+  await phone2.goto(base);
+  await waitFor('the owed ots-pending, signed on boot', () => peachPendings().length === 2, 15000);
+  assert.equal(peachPendings()[1].ev.content, peachRecord.ots.file, 'it carries the stored proof');
+  await phone2.getByRole('button', { name: 'My claims (1)' }).click();
+  await phone2.locator('.claim').getByText('Submitted.').waitFor();
+  assert.equal(await phone2.locator('.claim').getByText('needs npub1').count(), 0);
+  log('owed carrier published on boot with the claimer key');
+
   const foreign = sockets.filter((u) => !u.startsWith('ws://127.0.0.1:'));
   assert.deepEqual(foreign, [], 'the page only ever opened local relay sockets');
   assert.deepEqual(errors, [], 'no page errors');

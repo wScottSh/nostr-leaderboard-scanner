@@ -22,7 +22,7 @@ import {
   parseIdentityInput, validateName, generatedKey, pastedKey, renameKey, newestProfile, profileName, keyLabel, shortNpub,
 } from './identity.js';
 import {
-  recordKey, startRecord, destinations, plan, applyResults, submitStatus, needsStamp, withStamp, upgradeDue, withUpgrade,
+  recordKey, startRecord, destinations, plan, applyResults, submitStatus, needsStamp, withStamp, withCarrier, upgradeDue, withUpgrade,
 } from './claim.js';
 import { stampDigest, upgradeOts, otsStatus, decodeFile, parseOts, bitcoinHeights } from './ots.js';
 
@@ -70,7 +70,7 @@ function renderIdle(message = '') {
       ${message ? `<p class="notice">${esc(message)}</p>` : ''}
       <p><button data-action="camera">Start camera</button></p>
       ${records.length ? `<p><button class="link" data-action="claims">My claims (${records.length})</button>
-        ${owed ? `<span class="sub"> · ${owed} need${owed === 1 ? 's' : ''} a retry</span>` : ''}</p>` : ''}
+        ${owed ? `<span class="sub"> · ${owed} unfinished</span>` : ''}</p>` : ''}
       <p class="fine"><a href="${LEADERBOARD_URL}">Open the leaderboard</a></p>
     </section>`;
 }
@@ -267,7 +267,7 @@ function renderLive() {
   const record = store.get().claims[view.rk];
   const { submitted } = submitStatus(record, TARGETS);
   const busy = isBusy(view.rk);
-  const retryable = !busy && (plan(record, TARGETS).length > 0 || needsStamp(record));
+  const retryable = !busy && canRetry(record);
   const check = checkRun(record.run);
   live.innerHTML = `
     <p class="sub">Claimed as <strong>${esc(claimerLabel(record))}</strong>
@@ -303,14 +303,17 @@ function publishSummary(record, busy) {
 function otsLine(record, rk) {
   if (stamping.has(rk)) return 'Timestamping your Claim at the OpenTimestamps calendars…';
   const status = otsStatus(record.ots.file);
+  const carrier = submitStatus(record, TARGETS).carrierOwed && store.get().key?.pubkey !== record.claim.pubkey
+    ? `The pending proof isn't published yet: it needs ${claimerLabel(record)} as the active key on this phone.` : '';
   const errors = Object.entries(record.ots.errors ?? {}).map(([cal, msg]) => `${calendarName(cal)}: ${msg}`).join('; ');
   if (status === 'none') return errors ? `Timestamp failed (${errors}). Retry to stamp again.` : 'Not timestamped yet.';
   if (status === 'pending') {
     return `Timestamp pending at ${record.ots.calendars.map(calendarName).join(', ')}${errors ? ` (failed: ${errors})` : ''}. `
-      + 'Bitcoin confirms it in about 1–2 hours; this page finishes the proof when you come back, and so can anyone holding the published pending proof.';
+      + 'Bitcoin confirms it in about 1–2 hours; this page finishes the proof when you come back'
+      + (carrier ? `. ${carrier}` : ', and so can anyone holding the published pending proof.');
   }
   const heights = bitcoinHeights(parseOts(decodeFile(record.ots.file)));
-  return `Timestamp confirmed in Bitcoin block ${Math.min(...heights)}.`;
+  return `Timestamp confirmed in Bitcoin block ${Math.min(...heights)}.${carrier ? ` ${carrier}` : ''}`;
 }
 
 // ---- My claims
@@ -329,6 +332,7 @@ function renderClaims() {
       </div>
     </section>`;
   renderClaimsList();
+  publishOwedCarriers();
   upgradeProofs();
 }
 
@@ -338,7 +342,7 @@ function renderClaimsList() {
   list.innerHTML = allRecords(store.get()).map((record) => {
     const rk = recordKey(record.run.id, record.claim.pubkey);
     const content = safeJson(record.run.content) ?? {};
-    const { submitted, needsRetry } = submitStatus(record, TARGETS);
+    const { submitted, relaysOwed } = submitStatus(record, TARGETS);
     const busy = isBusy(rk);
     return `
       <div class="claim" data-rk="${esc(rk)}">
@@ -346,11 +350,11 @@ function renderClaimsList() {
         <p class="sub">${esc(courseName(content.course))} · as ${esc(claimerLabel(record))}
           · ${new Date(record.claim.created_at * 1000).toLocaleString()}</p>
         <p class="${submitted ? 'good' : 'notice'}">${esc(busy ? 'Submitting…' : submitted
-          ? (needsRetry ? 'Submitted; some relays still owe a copy.' : 'Submitted.') : publishSummary(record, false))}</p>
+          ? (relaysOwed ? 'Submitted; some relays still owe a copy.' : 'Submitted.') : publishSummary(record, false))}</p>
         <p class="sub">${esc(otsLine(record, rk))}</p>
         <p>
           <button class="link" data-action="open" data-rk="${esc(rk)}">Details</button>
-          ${!busy && (needsRetry || needsStamp(record)) ? ` · <button class="link" data-action="retry" data-rk="${esc(rk)}">Retry</button>` : ''}
+          ${!busy && canRetry(record) ? ` · <button class="link" data-action="retry" data-rk="${esc(rk)}">Retry</button>` : ''}
           ${record.ots.file ? ` · <button class="link" data-action="download" data-rk="${esc(rk)}">Download proof (.ots)</button>` : ''}
         </p>
       </div>`;
@@ -383,12 +387,19 @@ function startSubmit(run) {
     else if (p?.kind === 'nsec') key = pastedKey(p.sk, identity.lookup?.sk === p.sk ? identity.lookup.name : null);
     else return;
     store.update((s) => setKey(s, key));
+    publishOwedCarriers();
   }
   const rk = recordKey(run.id, key.pubkey);
   // One Claim per (Run, key), signed at the first tap and reused forever after.
   if (!findRecord(store.get(), run.id, key.pubkey)) store.update((s) => putRecord(s, startRecord(run, key, nowSec(), RELAYS[0])));
   renderRecord(rk);
   work(rk);
+}
+
+/** A Retry tap would do something: resend, restamp, or sign the owed carrier with the active key. */
+function canRetry(record) {
+  const { relaysOwed, stampOwed, carrierOwed } = submitStatus(record, TARGETS);
+  return relaysOwed || stampOwed || (carrierOwed && store.get().key?.pubkey === record.claim.pubkey);
 }
 
 const isBusy = (rk) => {
@@ -400,6 +411,7 @@ const updateRecord = (rk, fn) => store.update((s) => putRecord(s, fn(s.claims[rk
 
 /** Everything a Claim still owes: unsent or failed (event, relay) pairs, and a stamp if it has none. */
 function work(rk) {
+  updateRecord(rk, (r) => withCarrier(r, store.get().key, nowSec()));
   sendOwed(rk);
   if (needsStamp(store.get().claims[rk])) stamp(rk);
 }
@@ -432,6 +444,17 @@ async function stamp(rk) {
   // Only the new proof carrier: earlier failures wait for the player's Retry.
   const { pending } = store.get().claims[rk];
   if (pending) sendOwed(rk, [pending.id]);
+}
+
+/** Sign and send every ots-pending carrier the active key owes (stamped while another key was active). */
+function publishOwedCarriers() {
+  const key = store.get().key;
+  for (const record of recordsFor(store.get(), key?.pubkey)) {
+    const signed = withCarrier(record, key, nowSec());
+    if (signed === record) continue;
+    store.update((s) => putRecord(s, signed));
+    sendOwed(recordKey(record.run.id, record.claim.pubkey), [signed.pending.id]);
+  }
 }
 
 /** Finish pending proofs an hour or more old; publish the 1040 the moment Bitcoin attests. */
@@ -647,4 +670,5 @@ document.addEventListener('click', (e) => {
 });
 window.addEventListener('hashchange', bootstrap);
 bootstrap();
+publishOwedCarriers();
 upgradeProofs();
