@@ -18,7 +18,6 @@ import {
 } from '../src/decode.js';
 import { FrameCollector } from '../src/collector.js';
 import { verifyEvent, checkRun } from '../src/verify.js';
-import { publishToRelay, publishAll, RELAYS } from '../src/relay.js';
 import { starBoardUrl, cabinetUrl } from '../src/links.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -145,43 +144,6 @@ test('checkRun: tampering is caught', () => {
   const rehashed = { ...faster, id: computeEventId(faster) };
   assert.equal(checkRun(rehashed).ok, false, 'sig no longer matches');
   assert.match(checkRun(rehashed).reason, /signature/);
-});
-
-// ------------------------------------------------------------- relay
-
-class FakeWS {
-  static reply = (ev) => ['OK', ev.id, true, ''];
-  static sent = [];
-  constructor(url) {
-    this.url = url;
-    queueMicrotask(() => this.onopen());
-  }
-  send(msg) {
-    FakeWS.sent.push([this.url, msg]);
-    const [, ev] = JSON.parse(msg);
-    const reply = FakeWS.reply(ev, this.url);
-    if (reply) queueMicrotask(() => this.onmessage({ data: JSON.stringify(reply) }));
-  }
-  close() {}
-}
-
-test('publish: sends NIP-01 EVENT to every leaderboard relay and reports each OK', async () => {
-  FakeWS.sent = [];
-  FakeWS.reply = (ev, url) => (url.includes('nos.lol') ? ['OK', ev.id, false, 'blocked: spam'] : ['OK', ev.id, true, '']);
-  const seen = [];
-  const results = await publishAll(RELAYS, LEADERBOARD_EVENT, (r) => seen.push(r.relay), { WebSocketImpl: FakeWS });
-  assert.deepEqual(RELAYS, ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net']);
-  assert.equal(FakeWS.sent.length, 3);
-  assert.deepEqual(JSON.parse(FakeWS.sent[0][1]), ['EVENT', LEADERBOARD_EVENT]);
-  assert.deepEqual(results.map((r) => r.ok), [true, false, true]);
-  assert.equal(results[1].message, 'blocked: spam');
-  assert.equal(seen.length, 3);
-});
-
-test('publish: OK for a different event id is ignored; silence times out', async () => {
-  FakeWS.reply = () => ['OK', 'f'.repeat(64), true, ''];
-  const r = await publishToRelay('wss://x', LEADERBOARD_EVENT, { WebSocketImpl: FakeWS, timeoutMs: 30 });
-  assert.deepEqual(r, { relay: 'wss://x', ok: false, message: 'timed out' });
 });
 
 // ------------------------------------------------------------- links

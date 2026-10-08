@@ -12,7 +12,7 @@
 import jsQR from 'jsqr';
 import { FrameCollector } from './collector.js';
 import { checkRun } from './verify.js';
-import { RELAYS, publishAll } from './relay.js';
+import { RELAYS, publishPairs } from './relay.js';
 import { starBoardUrl, cabinetUrl, LEADERBOARD_URL } from './links.js';
 import { courseName, starName, formatFrames, COURSES } from './stars.js';
 
@@ -121,7 +121,7 @@ function renderError(err) {
 // ---------------------------------------------------------------- publishing
 
 async function publish(event) {
-  const results = await publishAll(RELAYS, event, (res) => {
+  const results = await publishPairs(RELAYS.map((relay) => ({ event, relay })), (res) => {
     const li = app.querySelector(`li[data-relay="${CSS.escape(res.relay)}"]`);
     if (!li) return;
     li.className = res.ok ? 'ok' : 'bad';
