@@ -12,7 +12,7 @@ import {
   indexEvents, decide, mergeFiles, pendingCalendars, readiness, finalEvent, pendingEvent, parseFinal, STAMP_AFTER_S, PARTIAL_AFTER_S,
 } from '../src/finalize.js';
 import { claimTemplate } from '../src/claim.js';
-import { signEvent, generateSecretKey } from '../src/sign.js';
+import { signEvent, generateSecretKey, pubkeyOf } from '../src/sign.js';
 import { decodeEvent } from '../src/decode.js';
 import { verifyEvent } from '../src/verify.js';
 import { newStamp, applyOp, serializeOts, parseOts, bitcoinHeights, finalTemplate } from '../src/ots.js';
@@ -45,7 +45,7 @@ function proof(digestHex, heights, salt = 0) {
   return serializeOts(root);
 }
 
-const decideFor = (events, claimId, now = T0 + 3600) => decide(indexEvents(events).get(claimId) ?? { claim: null, pendings: [], finals: [] }, now);
+const decideFor = (events, claimId, now = T0 + 3600) => decide(indexEvents(events).get(claimId) ?? { claim: null, pendings: [], finals: [] }, now, pubkeyOf(finalizer));
 
 test('decide: a Claim with no proof anywhere is stamped once it is over 120 s old', () => {
   const claim = signedClaim();
@@ -67,6 +67,15 @@ test('decide: a 1040 with a Bitcoin attestation means done, whatever else is the
   const final = finalEvent(claim.id, proof(claim.id, { [ALICE]: 917000 }), 'wss://a', T0 + 7200, finalizer);
   assert.deepEqual(decideFor([claim, pending, final], claim.id), { kind: 'done' });
   assert.deepEqual(decideFor([final, claim], claim.id), { kind: 'done' });
+});
+
+test('decide: a valid Bitcoin 1040 signed by any other key is ignored (its Bitcoin header is unverifiable here)', () => {
+  const claim = signedClaim();
+  const pending = pendingEvent(claim.id, proof(claim.id, { [ALICE]: 0 }), T0, claimer);
+  const someoneElse = finalEvent(claim.id, proof(claim.id, { [ALICE]: 917000 }), 'wss://a', T0 + 7200, generateSecretKey());
+  assert.equal(verifyEvent(someoneElse), true);
+  assert.equal(decideFor([claim, pending, someoneElse], claim.id).kind, 'upgrade');
+  assert.deepEqual(decideFor([claim, someoneElse], claim.id), { kind: 'stamp' });
 });
 
 test('decide: a 1040 without a Bitcoin attestation, or for another digest, does not count', () => {

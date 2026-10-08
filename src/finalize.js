@@ -3,7 +3,7 @@
  * events alone. Pure: no sockets, no clocks, no calendars (finalizer/run.mjs
  * is the shell).
  *
- * Entry = { claim: Event|null, pendings: Pending[], finals: Event[] }   per Claim id
+ * Entry = { claim: Event|null, pendings: Pending[], finals: Event[] }   per Claim id; finals from any author
  * Pending = { event, stamp }   an ots-pending carrier and its parsed proof
  * Decision = { kind: 'done' } | { kind: 'stamp' } | { kind: 'upgrade', files: Uint8Array[] }
  *          | { kind: 'skip', reason }
@@ -93,8 +93,13 @@ export function indexEvents(events) {
   return entries;
 }
 
-export function decide(entry, nowSec) {
-  if (entry.finals.length) return { kind: 'done' };
+/**
+ * finalizerPubkey: only this finalizer's own 1040s make a Claim done. Nobody
+ * here checks a 1040's Bitcoin block header, so anyone else's could be a
+ * forgery published to stop the Claim from ever being finalized.
+ */
+export function decide(entry, nowSec, finalizerPubkey) {
+  if (entry.finals.some((ev) => ev.pubkey === finalizerPubkey)) return { kind: 'done' };
   if (!entry.claim) return { kind: 'skip', reason: 'claim not found' };
   if (entry.pendings.length) return { kind: 'upgrade', files: entry.pendings.map((p) => serializeOts(p.stamp)) };
   if (nowSec - entry.claim.created_at > STAMP_AFTER_S) return { kind: 'stamp' };

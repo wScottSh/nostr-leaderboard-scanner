@@ -13,10 +13,11 @@
  *
  * FINALIZER_KEY_FILE   hex secret key that signs the 1040s and fallback
  *                      ots-pendings; created (0600) if missing. Default ./finalizer.key
+ *                      Only 1040s signed by this key mark a Claim done.
  * FINALIZER_RELAYS, FINALIZER_CALENDARS   comma-separated overrides, for tests only.
  *
  * --dry-run prints each decision, asks the calendars (GET only), and
- * publishes, stamps and writes nothing.
+ * publishes, stamps and writes nothing. It reads the key if there is one.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { RELAYS as DEFAULT_RELAYS, queryRelays, publishPairs } from '../src/relay.js';
@@ -40,14 +41,21 @@ const short = (id) => id.slice(0, 12);
 const host = (u) => new URL(u).host;
 const log = (...parts) => console.log(parts.join(' '));
 
-function loadKey(file) {
+/** The key in file, or null if there is none yet. */
+function readKey(file) {
   try {
     const sk = readFileSync(file, 'utf8').trim();
     pubkeyOf(sk);
     return sk;
   } catch (e) {
     if (e.code !== 'ENOENT') throw new Error(`${file}: ${e.message}`);
+    return null;
   }
+}
+
+function loadKey(file) {
+  const existing = readKey(file);
+  if (existing) return existing;
   const sk = generateSecretKey();
   writeFileSync(file, `${sk}\n`, { mode: 0o600, flag: 'wx' });
   log('key: created', file);
@@ -68,7 +76,7 @@ async function read(what, filter) {
 }
 
 /** Every recent Claim's entry, or null if any read went unanswered. */
-async function readRelays(now) {
+async function readRelays(now, pubkey) {
   const recent = await Promise.all([
     read('claim', { kinds: [8064], '#t': ['claim'], since: now - 7 * DAY }),
     read('ots-pending', { kinds: [8064], '#t': ['ots-pending'], since: now - 7 * DAY }),
@@ -77,7 +85,7 @@ async function readRelays(now) {
   if (recent.includes(null)) return null;
   const first = indexEvents(recent.flat());
   // Some relays don't index #k: ask for the 1040s of every Claim not yet done by #e too.
-  const open = [...first].filter(([, entry]) => !entry.finals.length).map(([id]) => id);
+  const open = [...first].filter(([, entry]) => decide(entry, now, pubkey).kind !== 'done').map(([id]) => id);
   const byE = await Promise.all(chunks(open, ID_CHUNK).map((ids) => read('1040 by #e', { kinds: [1040], '#e': ids })));
   if (byE.includes(null)) return null;
   return indexEvents([...recent.flat(), ...byE.flat()]);
@@ -114,14 +122,16 @@ async function upgrade(claimId, entry, files, now, sk) {
 
 async function main() {
   const now = nowSec();
-  const sk = dryRun ? null : loadKey(process.env.FINALIZER_KEY_FILE ?? 'finalizer.key');
-  const entries = await readRelays(now);
+  const keyFile = process.env.FINALIZER_KEY_FILE ?? 'finalizer.key';
+  const sk = dryRun ? readKey(keyFile) : loadKey(keyFile);
+  const pubkey = sk && pubkeyOf(sk);
+  const entries = await readRelays(now, pubkey);
   if (!entries) return;
-  const decisions = [...entries].map(([id, entry]) => ({ id, entry, decision: decide(entry, now) }));
+  const decisions = [...entries].map(([id, entry]) => ({ id, entry, decision: decide(entry, now, pubkey) }));
   const count = (k) => decisions.filter((d) => d.decision.kind === k).length;
   log(`${dryRun ? 'dry-run ' : ''}relays=${RELAYS.map(host).join(',')}`, `claims=${entries.size}`,
     `done=${count('done')} upgrade=${count('upgrade')} stamp=${count('stamp')} skip=${count('skip')}`,
-    sk ? `key=${pubkeyOf(sk).slice(0, 12)}` : '');
+    `key=${pubkey ? pubkey.slice(0, 12) : 'none (no 1040 counts as ours)'}`);
   const queue = [...decisions];
   const worker = async () => {
     for (let d = queue.shift(); d; d = queue.shift()) {
