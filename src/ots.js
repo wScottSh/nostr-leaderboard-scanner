@@ -20,7 +20,8 @@ import { keccak_256 } from '@noble/hashes/sha3.js';
 import { bytesToHex, hexToBytes, concatBytes, utf8ToBytes } from '@noble/hashes/utils.js';
 import { base64 } from '@scure/base';
 
-export const CALENDARS = [
+/* global __SCANNER_CALENDARS__ */
+export const CALENDARS = typeof __SCANNER_CALENDARS__ !== 'undefined' ? __SCANNER_CALENDARS__ : [
   'https://alice.btc.calendar.opentimestamps.org',
   'https://bob.btc.calendar.opentimestamps.org',
   'https://finney.calendar.eternitywall.com',

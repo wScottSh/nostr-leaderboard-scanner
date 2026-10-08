@@ -4,7 +4,6 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +11,7 @@ import path from 'node:path';
 
 import { startRelay } from './support/relay.mjs';
 import { startCalendar } from './support/calendar.mjs';
+import { runFinalizer as finalize } from './support/finalizer.mjs';
 import { claimTemplate } from '../src/claim.js';
 import { signEvent, generateSecretKey, pubkeyOf } from '../src/sign.js';
 import { decodeEvent } from '../src/decode.js';
@@ -23,18 +23,6 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const fixture = JSON.parse(readFileSync(path.join(here, 'fixtures', 'multiframe_fixture.json'), 'utf8'));
 const RUN = decodeEvent(Uint8Array.from(Buffer.from(fixture.packedPayloadHex, 'hex')));
 const nowSec = () => Math.floor(Date.now() / 1000);
-
-function finalize({ relays, calendars, keyFile, args = [] }) {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [path.join(here, '..', 'finalizer', 'run.mjs'), ...args], {
-      env: { ...process.env, FINALIZER_RELAYS: relays.join(','), FINALIZER_CALENDARS: calendars.join(','), FINALIZER_KEY_FILE: keyFile },
-    });
-    let out = '';
-    child.stdout.on('data', (d) => { out += d; });
-    child.stderr.on('data', (d) => { out += d; });
-    child.on('exit', (code) => resolve({ code, out }));
-  });
-}
 
 const of = (relay, pred) => [...relay.received].map(({ ev }) => ev).filter(pred);
 const isFinal = (ev) => ev.kind === 1040;

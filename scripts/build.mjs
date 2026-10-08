@@ -1,7 +1,8 @@
 // Bundles src/main.js (+ noble crypto) into dist/app.js and copies public/.
 // `--serve` starts a local dev server with rebuild-on-request.
-// SCANNER_RELAYS / SCANNER_INDEXERS (comma-separated ws URLs) replace the
-// relay lists at build time, for local end-to-end runs only.
+// SCANNER_RELAYS / SCANNER_INDEXERS (comma-separated ws URLs) and
+// SCANNER_CALENDARS (http URLs) replace those lists at build time, for local
+// end-to-end runs only.
 import * as esbuild from 'esbuild';
 import { cpSync, rmSync } from 'node:fs';
 
@@ -10,7 +11,7 @@ rmSync('dist', { recursive: true, force: true });
 cpSync('public', 'dist', { recursive: true });
 
 const define = {};
-for (const [env, name] of [['SCANNER_RELAYS', '__SCANNER_RELAYS__'], ['SCANNER_INDEXERS', '__SCANNER_INDEXERS__']]) {
+for (const [env, name] of [['SCANNER_RELAYS', '__SCANNER_RELAYS__'], ['SCANNER_INDEXERS', '__SCANNER_INDEXERS__'], ['SCANNER_CALENDARS', '__SCANNER_CALENDARS__']]) {
   if (process.env[env]) define[name] = JSON.stringify(process.env[env].split(',').map((s) => s.trim()).filter(Boolean));
 }
 

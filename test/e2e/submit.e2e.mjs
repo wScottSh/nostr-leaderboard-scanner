@@ -3,25 +3,30 @@
  *
  *   npm run e2e        (CHROME=<path> to use another Chromium)
  *
- * Builds the page with SCANNER_RELAYS / SCANNER_INDEXERS pointing at two
- * local relays started here, so nothing reaches a public relay (asserted:
- * every WebSocket the page opens is local). OpenTimestamps calendars are
- * the real ones. dist/ is rebuilt with the real relays on the way out.
+ * Builds the page with SCANNER_RELAYS / SCANNER_INDEXERS / SCANNER_CALENDARS
+ * pointing at two local relays and a fake OpenTimestamps calendar started
+ * here, so nothing leaves this machine (asserted: every socket and request
+ * the page opens is local). The last step closes the page right after
+ * Submit and runs the finalizer against the same relay and calendar.
+ * dist/ is rebuilt with the real lists on the way out.
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { readFileSync, existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { readFileSync, existsSync, mkdtempSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { WebSocketServer } from 'ws';
 import { chromium } from 'playwright-core';
 
 import { decodeEvent } from '../../src/decode.js';
 import { signEvent, generateSecretKey, pubkeyOf } from '../../src/sign.js';
 import { profileTemplate, npubOf } from '../../src/identity.js';
-import { parseOts } from '../../src/ots.js';
+import { parseOts, bitcoinHeights } from '../../src/ots.js';
+import { verifyEvent } from '../../src/verify.js';
+import { startRelay } from '../support/relay.mjs';
+import { startCalendar } from '../support/calendar.mjs';
+import { runFinalizer } from '../support/finalizer.mjs';
 import { bech32 } from '@scure/base';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -30,43 +35,6 @@ const packed = Uint8Array.from(Buffer.from(fixture.packedPayloadHex, 'hex'));
 const RUN = decodeEvent(packed);
 const CHROME = process.env.CHROME ?? path.join(homedir(), '.cache/ms-playwright/chromium-1248/chrome-linux64/chrome');
 const log = (...a) => console.log('  ', ...a);
-
-// ------------------------------------------------------------- a throwaway relay
-
-/** NIP-01 relay in memory. reject(ev, attempt) may return a rejection message. */
-function startRelay(name, { reject = () => null } = {}) {
-  const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 });
-  const relay = { name, received: [], stored: new Map(), attempts: new Map(), wss };
-  wss.on('connection', (ws) => {
-    ws.on('message', (raw) => {
-      const text = raw.toString();
-      const msg = JSON.parse(text);
-      if (msg[0] === 'EVENT') {
-        const ev = msg[1];
-        relay.received.push({ text, ev });
-        const attempt = (relay.attempts.get(ev.id) ?? 0) + 1;
-        relay.attempts.set(ev.id, attempt);
-        const no = reject(ev, attempt);
-        if (no) return ws.send(JSON.stringify(['OK', ev.id, false, no]));
-        const dup = relay.stored.has(ev.id);
-        relay.stored.set(ev.id, ev);
-        ws.send(JSON.stringify(['OK', ev.id, true, dup ? 'duplicate: already have this event' : '']));
-      } else if (msg[0] === 'REQ') {
-        const [, sub, filter] = msg;
-        for (const ev of relay.stored.values()) {
-          if ((!filter.kinds || filter.kinds.includes(ev.kind)) && (!filter.authors || filter.authors.includes(ev.pubkey))) {
-            ws.send(JSON.stringify(['EVENT', sub, ev]));
-          }
-        }
-        ws.send(JSON.stringify(['EOSE', sub]));
-      }
-    });
-  });
-  return new Promise((resolve) => wss.on('listening', () => {
-    relay.url = `ws://127.0.0.1:${wss.address().port}`;
-    resolve(relay);
-  }));
-}
 
 // ------------------------------------------------------------- the page
 
@@ -119,6 +87,7 @@ const relay = await startRelay('relay', {
   reject: (ev, attempt) => (ev.id === RUN.id && attempt === 1 ? 'invalid: created_at too early' : null),
 });
 const indexer = await startRelay('indexer');
+const calendar = await startCalendar({ delayMs: 1500 });
 
 // A player who already has a Nostr key and a name on the indexer.
 const otherSk = generateSecretKey();
@@ -127,7 +96,7 @@ indexer.stored.set(otherProfile.id, otherProfile);
 const otherNsec = bech32.encode('nsec', bech32.toWords(Buffer.from(otherSk, 'hex')));
 
 const build = spawnSync('node', ['scripts/build.mjs'], {
-  cwd: root, encoding: 'utf8', env: { ...process.env, SCANNER_RELAYS: relay.url, SCANNER_INDEXERS: indexer.url },
+  cwd: root, encoding: 'utf8', env: { ...process.env, SCANNER_RELAYS: relay.url, SCANNER_INDEXERS: indexer.url, SCANNER_CALENDARS: calendar.url },
 });
 assert.equal(build.status, 0, build.stderr);
 log(build.stdout.trim().split('\n')[0]);
@@ -135,10 +104,12 @@ log(build.stdout.trim().split('\n')[0]);
 const { server, url: base } = await serveDist();
 const browser = await chromium.launch({ executablePath: CHROME, headless: true });
 const sockets = [];
+const requests = [];
 const errors = [];
 const newPage = async (context) => {
   const page = await context.newPage();
   page.on('websocket', (ws) => sockets.push(ws.url()));
+  page.on('request', (req) => requests.push(req.url()));
   page.on('pageerror', (e) => errors.push(e.message));
   return page;
 };
@@ -240,18 +211,49 @@ try {
   assert.ok(!indexer.received.some(({ ev }) => ev.pubkey === pubkeyOf(otherSk)));
   log('claimed as:', (await phone2.locator('#live p').first().textContent()).replace(/\s+/g, ' ').trim(), `(${npubOf(pubkeyOf(otherSk)).slice(0, 12)}…)`);
 
-  const foreign = sockets.filter((u) => !u.startsWith('ws://127.0.0.1:'));
-  assert.deepEqual(foreign, [], 'the page only ever opened local relay sockets');
+  console.log('6. walk away: a new player closes the page the moment Done shows; the finalizer finishes the proof');
+  const context3 = await browser.newContext();
+  const phone3 = await newPage(context3);
+  await phone3.goto(singleFrameUrl(base, packed));
+  await phone3.locator('#ident').fill('Toad');
+  await phone3.locator('#submit').click();
+  await phone3.getByText('Saving… keep this page open a few seconds.').waitFor();
+  await phone3.getByText('Done. You can close this page. Your Bitcoin timestamp finishes on its own in a few hours.').waitFor({ timeout: 30000 });
+  await context3.close();
+  const toad = relay.received.find(({ ev }) => ev.kind === 0 && JSON.parse(ev.content).name === 'Toad').ev.pubkey;
+  const toadClaim = relay.received.find(({ ev }) => ev.pubkey === toad && ev.tags.some((t) => t[1] === 'claim')).ev;
+  assert.ok(relay.received.some(({ ev }) => ev.pubkey === toad && ev.tags.some((t) => t[1] === 'ots-pending')), 'the ots-pending was on the relay before Done');
+  log('page closed; claim', toadClaim.id.slice(0, 12));
+
+  calendar.mine(917000);
+  const finals = () => [...relay.stored.values()].filter((ev) => ev.kind === 1040 && ev.tags.some((t) => t[0] === 'e' && t[1] === toadClaim.id));
+  const env = { relays: [relay.url], calendars: [calendar.url], keyFile: path.join(mkdtempSync(path.join(tmpdir(), 'finalizer-')), 'key.hex') };
+  const first = await runFinalizer(env);
+  assert.equal(first.code, 0, first.out);
+  first.out.trim().split('\n').forEach((l) => log('finalizer:', l));
+  const second = await runFinalizer(env);
+  assert.equal(second.code, 0, second.out);
+  assert.match(second.out, /upgrade=0 stamp=0/, 'second run has nothing to do');
+  const [final, ...extra] = finals();
+  assert.equal(extra.length, 0, 'exactly one 1040 for the Claim');
+  assert.equal(verifyEvent(final), true);
+  const finalProof = parseOts(Buffer.from(final.content, 'base64'));
+  assert.equal(Buffer.from(finalProof.msg).toString('hex'), toadClaim.id, '1040 stamps the Claim id');
+  assert.deepEqual(bitcoinHeights(finalProof), [917000]);
+  log(`1040 ${final.id.slice(0, 12)} for the closed page's Claim: Bitcoin block ${bitcoinHeights(finalProof)[0]}`);
+
+  const foreign = [...sockets, ...requests].filter((u) => !/^(ws|http):\/\/127\.0\.0\.1:/.test(u));
+  assert.deepEqual(foreign, [], 'the page only ever talked to this machine');
   assert.deepEqual(errors, [], 'no page errors');
-  log(`sockets opened: ${sockets.length}, all local`);
+  log(`sockets opened: ${sockets.length}, requests: ${requests.length}, all local`);
   console.log('e2e: all checks passed');
 } finally {
   await browser.close();
   server.close();
-  relay.wss.close();
-  indexer.wss.close();
+  await Promise.all([relay.close(), indexer.close(), calendar.close()]);
   const env = { ...process.env };
   delete env.SCANNER_RELAYS;
   delete env.SCANNER_INDEXERS;
+  delete env.SCANNER_CALENDARS;
   spawnSync('node', ['scripts/build.mjs'], { cwd: root, env });
 }

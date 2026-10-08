@@ -3,14 +3,15 @@
  * answers a pending attestation for a leaf commitment; GET
  * /timestamp/<leaf> answers 404 until mine(height), then a Bitcoin-attested
  * path for that leaf. Sends CORS so the page in the e2e can use it.
+ * delayMs holds every answer that long, so a page shows its in-flight state.
  */
 import { createServer } from 'node:http';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { newStamp, applyOp, serializeTimestamp } from '../../src/ots.js';
 
-export function startCalendar() {
-  const cal = { leaves: new Map(), height: 0, requests: [] };
+export function startCalendar({ delayMs = 0 } = {}) {
+  const cal = { leaves: new Map(), height: 0, requests: [], delayMs };
   cal.mine = (height) => {
     cal.height = height;
   };
@@ -22,6 +23,7 @@ export function startCalendar() {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
     if (req.method === 'OPTIONS') return res.writeHead(204).end();
+    if (cal.delayMs) await new Promise((r) => setTimeout(r, cal.delayMs));
     if (req.method === 'POST' && req.url === '/digest' && body.length === 32) {
       const root = newStamp(body);
       const op = { tag: 0xf0, arg: crypto.getRandomValues(new Uint8Array(8)) };
