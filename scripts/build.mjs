@@ -31,5 +31,6 @@ if (serve) {
   console.log(`dev server: http://localhost:${port}/`);
 } else {
   await esbuild.build(options);
-  console.log('built dist/', Object.keys(define).length ? define : '');
+  const overrides = Object.entries(define).map(([k, v]) => `${k}=${v}`).join(' ');
+  console.log(`built dist/${overrides ? ` with ${overrides}` : ''}`);
 }
