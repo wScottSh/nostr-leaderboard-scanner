@@ -67,15 +67,20 @@ nostr-leaderboard's `test/fixtures/cabinet_event.json`, and the tests assert tha
 is one stateless pass over the leaderboard relays (`RELAYS`); the relays are its only state.
 
 1. It reads the last 7 days of Claims and `ots-pending` events and the last 8 days of kind-1040 proofs
-   (by `#k`, and by `#e` for relays that don't index `#k`).
+   (by `#k`, and by `#e` for relays that don't index `#k`), plus the Runs of Claims that have no proof yet.
+   If any read gets no EOSE from any relay, it logs `abort:` and publishes nothing that pass.
 2. It drops any event with a bad id or signature, a tag shape other than the ones in the table above, or a
    proof that doesn't stamp the Claim it names.
 3. For each Claim (`src/finalize.js`):
-   - A Bitcoin-attested 1040 exists: nothing to do.
+   - A Bitcoin-attested 1040 signed by this finalizer's own key exists: nothing to do. Other keys' 1040s
+     don't count, because the finalizer can't check their Bitcoin block headers.
    - It has `ots-pending` proofs: merge them, ask their calendars for the Bitcoin path, and publish the 1040
      once ready (see the table).
-   - It has no proof and is over 120 s old (the page closed before stamping): stamp it and publish an
-     `ots-pending`.
+   - It has no proof, is over 10 minutes old (the page closed before stamping), and the Run it names is on
+     the relays and passes `checkRun`: stamp it and publish an `ots-pending`. At most 20 a pass, oldest
+     first; the rest wait for the next pass.
+4. It logs `expiring` for each Claim over 6 days old with no 1040 of its own; at 7 days it leaves the
+   reads.
 
 A second run right after the first publishes nothing.
 
