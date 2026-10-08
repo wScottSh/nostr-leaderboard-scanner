@@ -2,7 +2,7 @@
   "name": "nostr-leaderboard-scanner",
   "private": true,
   "type": "module",
-  "description": "Phone scanner for sm64-nostr cabinet star QRs; publishes the signed run to nostr-leaderboard's relays.",
+  "description": "Phone scanner for sm64-nostr cabinet star QRs; submits the signed run and the player's Claim to nostr-leaderboard's relays.",
   "scripts": {
     "build": "node scripts/build.mjs",
     "dev": "node scripts/build.mjs --serve",
