@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 
 import {
   applyOp, parseOts, serializeOts, parseTimestamp, serializeTimestamp, newStamp, merge, bitcoinHeights,
-  pruneToBitcoin, stampDigest, upgradeOts, otsStatus, encodeFile, pendingTemplate, finalTemplate, CALENDARS,
+  pruneToBitcoin, stampDigest, upgradeOts, pendingTemplate, finalTemplate, CALENDARS,
 } from '../src/ots.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -59,7 +59,6 @@ test('real complete proof: hello-world.txt.ots parses, its Bitcoin attestation i
   assert.equal(hex(stamp.msg), hex(sha256(fx('hello-world.txt'))));
   assert.deepEqual(bitcoinHeights(stamp), [358391]);
   assert.equal(hex(serializeOts(stamp)), hex(HELLO));
-  assert.equal(otsStatus(encodeFile(HELLO)), 'complete');
 });
 
 test('real two-calendar pending proof: a fork, two pending attestations, byte-identical round trip', () => {
@@ -67,7 +66,7 @@ test('real two-calendar pending proof: a fork, two pending attestations, byte-id
   assert.equal(hex(stamp.msg), hex(sha256(fx('two-calendars.txt'))));
   assert.deepEqual(pendingUris(stamp), ['https://alice.btc.calendar.opentimestamps.org', 'https://bob.btc.calendar.opentimestamps.org']);
   assert.equal(hex(serializeOts(stamp)), hex(TWO));
-  assert.equal(otsStatus(encodeFile(TWO)), 'pending');
+  assert.deepEqual(bitcoinHeights(stamp), []);
 });
 
 test('real calendar responses (captured live): parse to a pending attestation and re-serialize byte for byte', () => {
@@ -216,7 +215,7 @@ test('upgrade: asks each of our calendars for its commitment, merges Bitcoin pat
   const up = await upgradeOts(file, { fetchImpl });
   assert.equal(up.changed, true);
   assert.equal(asked.length, 2);
-  assert.equal(otsStatus(encodeFile(up.file)), 'complete');
+  assert.equal(bitcoinHeights(parseOts(up.file)).length, 1);
   const upgraded = parseOts(up.file);
   assert.deepEqual(pendingUris(upgraded), [ALICE, FINNEY].sort(), 'pending kept until the 1040 lands');
 
@@ -259,7 +258,7 @@ test('upgrade: a calendar that never answers is "not yet", and the others still 
   const fetchImpl = async (url) => (url.startsWith(ALICE) ? response(serializeTimestamp(done)) : hang());
   const up = await upgradeOts(file, { fetchImpl, timeoutMs: 50 });
   assert.equal(up.changed, true);
-  assert.equal(otsStatus(encodeFile(up.file)), 'complete');
+  assert.equal(bitcoinHeights(parseOts(up.file)).length, 1);
 });
 
 test('upgrade: never contacts a calendar outside our list', async () => {

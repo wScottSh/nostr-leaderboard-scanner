@@ -303,12 +303,6 @@ export function bitcoinCalendars(stamp) {
   return [...uris];
 }
 
-/** 'none' (no proof), 'pending' (calendars only), or 'complete' (Bitcoin attests). */
-export function otsStatus(fileB64) {
-  if (!fileB64) return 'none';
-  return bitcoinHeights(parseOts(base64.decode(fileB64))).length ? 'complete' : 'pending';
-}
-
 /**
  * Copy of stamp keeping only the paths that end in a Bitcoin attestation
  * (every calendar's, not just one: the leaderboard compares calendar times),
@@ -424,5 +418,4 @@ export const finalTemplate = (claimId, prunedBytes, relayHint, createdAt) => ({
   content: base64.encode(prunedBytes),
 });
 
-export const encodeFile = (bytes) => base64.encode(bytes);
 export const decodeFile = (b64) => base64.decode(b64);

@@ -21,7 +21,7 @@ import { chromium } from 'playwright-core';
 import { decodeEvent } from '../../src/decode.js';
 import { signEvent, generateSecretKey, pubkeyOf } from '../../src/sign.js';
 import { profileTemplate, npubOf } from '../../src/identity.js';
-import { parseOts, serializeOts, otsStatus } from '../../src/ots.js';
+import { parseOts } from '../../src/ots.js';
 import { bech32 } from '@scure/base';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -182,7 +182,7 @@ try {
   assert.deepEqual(relay.received.slice(before).map(({ ev }) => ev.id), [RUN.id], 'retry resent only the failed pair');
   const otsLine = await page.locator('#ots-status').textContent();
   log('ots line:', otsLine);
-  assert.match(otsLine, /Timestamp pending at/);
+  assert.match(otsLine, /Timestamp requested at/);
 
   console.log('3. reload: the key is remembered and My claims lists the Claim');
   const tampered = packed.slice();
@@ -197,11 +197,10 @@ try {
   const card = await page.locator('.claim').innerText();
   log('my claims:', card.replace(/\s+/g, ' '));
   assert.match(card, /Submitted\./);
-  const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Download proof (.ots)' }).click()]);
-  const proof = parseOts(new Uint8Array(readFileSync(await download.path())));
-  assert.equal(Buffer.from(proof.msg).toString('hex'), claim.id, 'the downloaded proof stamps the Claim id');
-  assert.equal(Buffer.from(serializeOts(proof)).toString('base64'), pending.content, 'and matches the published ots-pending');
-  log(`downloaded ${download.suggestedFilename()}: stamps the Claim id; status ${otsStatus(pending.content)}`);
+  assert.match(card, /Timestamp requested at/);
+  assert.equal(await page.getByText('Download proof').count(), 0, 'the proof lives on Nostr, not in a download');
+  const proof = parseOts(Buffer.from(pending.content, 'base64'));
+  assert.equal(Buffer.from(proof.msg).toString('hex'), claim.id, 'the published ots-pending stamps the Claim id');
 
   console.log('4. re-scanning the claimed Run opens the stored record; no new Claim');
   const sent = relay.received.length;
@@ -240,32 +239,6 @@ try {
   assert.ok(!relay.received.some(({ ev }) => ev.kind === 0 && ev.pubkey === pubkeyOf(otherSk)), 'no kind-0 for a pasted key');
   assert.ok(!indexer.received.some(({ ev }) => ev.pubkey === pubkeyOf(otherSk)));
   log('claimed as:', (await phone2.locator('#live p').first().textContent()).replace(/\s+/g, ' ').trim(), `(${npubOf(pubkeyOf(otherSk)).slice(0, 12)}…)`);
-
-  console.log('6. a proof stamped while another key was active: published once the claimer key is back');
-  const peach = pubkeyOf(otherSk);
-  const peachPendings = () => relay.received.filter(({ ev }) => ev.pubkey === peach && ev.tags.some((t) => t[1] === 'ots-pending'));
-  await waitFor('Peach’s first ots-pending', () => peachPendings().length === 1, 45000);
-  const STATE = 'nostr-leaderboard-scanner';
-  const state = JSON.parse(await phone2.evaluate((k) => localStorage.getItem(k), STATE));
-  const peachKey = state.key;
-  const [peachRecord] = Object.values(state.claims);
-  delete peachRecord.sends[peachRecord.pending.id];
-  peachRecord.pending = null;
-  await phone2.evaluate(([k, v]) => localStorage.setItem(k, v), [STATE, JSON.stringify({ ...state, key: null })]);
-  await phone2.goto(base);
-  await phone2.getByText('1 unfinished').waitFor();
-  await phone2.getByRole('button', { name: 'My claims (1)' }).click();
-  await phone2.locator('.claim').getByText('needs npub1').waitFor();
-  assert.equal(await phone2.locator('.claim [data-action="retry"]').count(), 0, 'no Retry that could not do anything');
-  assert.equal(peachPendings().length, 1, 'nothing signed without the claimer key');
-  await phone2.evaluate(([k, v]) => localStorage.setItem(k, v), [STATE, JSON.stringify({ ...state, key: peachKey })]);
-  await phone2.goto(base);
-  await waitFor('the owed ots-pending, signed on boot', () => peachPendings().length === 2, 15000);
-  assert.equal(peachPendings()[1].ev.content, peachRecord.ots.file, 'it carries the stored proof');
-  await phone2.getByRole('button', { name: 'My claims (1)' }).click();
-  await phone2.locator('.claim').getByText('Submitted.').waitFor();
-  assert.equal(await phone2.locator('.claim').getByText('needs npub1').count(), 0);
-  log('owed carrier published on boot with the claimer key');
 
   const foreign = sockets.filter((u) => !u.startsWith('ws://127.0.0.1:'));
   assert.deepEqual(foreign, [], 'the page only ever opened local relay sockets');

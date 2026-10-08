@@ -9,7 +9,8 @@
  *      is published before Submit.
  *   4. Submit signs a Claim once (claim.js), publishes the owed events
  *      (relay.js), and stamps the Claim (ots.js). Everything is persisted
- *      (store.js), so results, retries, and proofs survive a reload.
+ *      (store.js), so results and retries survive a reload. The finalizer
+ *      (finalizer/run.mjs) finishes the timestamp from the relays.
  */
 import jsQR from 'jsqr';
 import { FrameCollector } from './collector.js';
@@ -22,9 +23,9 @@ import {
   parseIdentityInput, validateName, generatedKey, pastedKey, renameKey, newestProfile, profileName, keyLabel, shortNpub,
 } from './identity.js';
 import {
-  recordKey, startRecord, destinations, plan, applyResults, submitStatus, needsStamp, withStamp, withCarrier, withProfile, upgradeDue, withUpgrade, finalWait,
+  recordKey, startRecord, destinations, plan, applyResults, submitStatus, withStamp, withProfile,
 } from './claim.js';
-import { stampDigest, upgradeOts, otsStatus, decodeFile, parseOts, bitcoinHeights } from './ots.js';
+import { stampDigest } from './ots.js';
 
 const app = document.getElementById('app');
 const collector = new FrameCollector();
@@ -45,7 +46,6 @@ let view = { name: 'idle' };
 // In-flight work, never persisted: a reload simply finds these pairs still owed.
 const sending = new Set(); // `${eventId}|${relay}`
 const stamping = new Set(); // record keys
-const upgrading = new Set(); // record keys
 
 const esc = (s) =>
   String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -60,7 +60,7 @@ function renderIdle(message = '') {
   stopCamera();
   view = { name: 'idle' };
   const records = allRecords(store.get());
-  const owed = records.filter((r) => submitStatus(r, TARGETS).needsRetry).length;
+  const owed = records.filter((r) => submitStatus(r, TARGETS).relaysOwed).length;
   app.innerHTML = `
     <section class="card center">
       <div class="big-star star">★</div>
@@ -250,7 +250,6 @@ const ROLE_LABEL = {
   run: 'Run',
   claim: 'Your Claim',
   pending: 'Timestamp proof, pending (ots-pending)',
-  final: 'Timestamp proof, Bitcoin (NIP-03)',
 };
 
 function cellView(record, eventId, relay) {
@@ -301,24 +300,9 @@ function publishSummary(record, busy) {
 }
 
 function otsLine(record, rk) {
-  if (stamping.has(rk)) return 'Timestamping your Claim at the OpenTimestamps calendars…';
-  const status = otsStatus(record.ots.file);
-  const carrier = submitStatus(record, TARGETS).carrierOwed && store.get().key?.pubkey !== record.claim.pubkey
-    ? `The pending proof isn't published yet: it needs ${claimerLabel(record)} as the active key on this phone.` : '';
-  const errors = Object.entries(record.ots.errors ?? {}).map(([cal, msg]) => `${calendarName(cal)}: ${msg}`).join('; ');
-  if (status === 'none') return errors ? `Timestamp failed (${errors}). Retry to stamp again.` : 'Not timestamped yet.';
-  if (status === 'pending') {
-    return `Timestamp pending at ${record.ots.calendars.map(calendarName).join(', ')}${errors ? ` (failed: ${errors})` : ''}. `
-      + 'Bitcoin confirms it in about 1–2 hours; this page finishes the proof when you come back'
-      + (carrier ? `. ${carrier}` : ', and so can anyone holding the published pending proof.');
-  }
-  const heights = bitcoinHeights(parseOts(decodeFile(record.ots.file)));
-  const wait = finalWait(record);
-  const waiting = wait?.waiting.length
-    ? ` ${wait.attested.length ? `Confirmed by ${wait.attested.map(calendarName).join(', ')}; waiting` : 'Waiting'} for ${wait.waiting.map(calendarName).join(', ')}`
-      + ` (until ${new Date(wait.until).toLocaleString()}) before publishing the Bitcoin proof, so it carries every calendar's time.`
-    : '';
-  return `Timestamp confirmed in Bitcoin block ${Math.min(...heights)}.${waiting}${carrier ? ` ${carrier}` : ''}`;
+  if (stamping.has(rk)) return 'Requesting a timestamp at the OpenTimestamps calendars…';
+  if (record.pending) return `Timestamp requested at ${record.ots.calendars.map(calendarName).join(', ')}.`;
+  return 'Timestamp will be requested by the finalizer.';
 }
 
 // ---- My claims
@@ -337,8 +321,6 @@ function renderClaims() {
       </div>
     </section>`;
   renderClaimsList();
-  publishOwedCarriers();
-  upgradeProofs();
 }
 
 function renderClaimsList() {
@@ -360,7 +342,6 @@ function renderClaimsList() {
         <p>
           <button class="link" data-action="open" data-rk="${esc(rk)}">Details</button>
           ${!busy && canRetry(record) ? ` · <button class="link" data-action="retry" data-rk="${esc(rk)}">Retry</button>` : ''}
-          ${record.ots.file ? ` · <button class="link" data-action="download" data-rk="${esc(rk)}">Download proof (.ots)</button>` : ''}
         </p>
       </div>`;
   }).join('');
@@ -392,20 +373,19 @@ function startSubmit(run) {
     else if (p?.kind === 'nsec') key = pastedKey(p.sk, identity.lookup?.sk === p.sk ? identity.lookup.name : null);
     else return;
     store.update((s) => setKey(s, key));
-    publishOwedCarriers();
   }
   const rk = recordKey(run.id, key.pubkey);
   // One Claim per (Run, key), signed at the first tap and reused forever after.
-  if (!findRecord(store.get(), run.id, key.pubkey)) store.update((s) => putRecord(s, startRecord(run, key, nowSec(), RELAYS[0])));
+  const first = !findRecord(store.get(), run.id, key.pubkey);
+  if (first) store.update((s) => putRecord(s, startRecord(run, key, nowSec(), RELAYS[0])));
   renderRecord(rk);
   work(rk);
+  if (first) stamp(rk, key);
 }
 
-/** A Retry tap would do something: resend, restamp, sign the owed carrier, or publish a changed name. */
+/** A Retry tap would do something: resend, or publish a changed name. */
 function canRetry(record) {
-  const key = store.get().key;
-  const { relaysOwed, stampOwed, carrierOwed } = submitStatus(record, TARGETS);
-  return relaysOwed || stampOwed || (carrierOwed && key?.pubkey === record.claim.pubkey) || withProfile(record, key) !== record;
+  return submitStatus(record, TARGETS).relaysOwed || withProfile(record, store.get().key) !== record;
 }
 
 const isBusy = (rk) => {
@@ -415,11 +395,10 @@ const isBusy = (rk) => {
 
 const updateRecord = (rk, fn) => store.update((s) => putRecord(s, fn(s.claims[rk])));
 
-/** Everything a Claim still owes: unsent or failed (event, relay) pairs, and a stamp if it has none. */
+/** Everything a Claim still owes the relays: unsent or failed (event, relay) pairs. */
 function work(rk) {
-  updateRecord(rk, (r) => withCarrier(withProfile(r, store.get().key), store.get().key, nowSec()));
+  updateRecord(rk, (r) => withProfile(r, store.get().key));
   sendOwed(rk);
-  if (needsStamp(store.get().claims[rk])) stamp(rk);
 }
 
 /** Sends owed pairs (only those for event ids in `only`, if given) that aren't already in flight. */
@@ -436,60 +415,23 @@ async function sendOwed(rk, only = null) {
   });
 }
 
-async function stamp(rk) {
-  if (stamping.has(rk)) return;
+/**
+ * Stamps a new Claim once, at Submit, and publishes its ots-pending signed
+ * with the key captured then (even if the player switched keys meanwhile).
+ * If no calendar answers, or the page closes first, the finalizer stamps it.
+ */
+async function stamp(rk, key) {
   stamping.add(rk);
   redraw();
   try {
     const result = await stampDigest(store.get().claims[rk].claim.id);
-    updateRecord(rk, (r) => withStamp(r, result, store.get().key, nowSec()));
+    updateRecord(rk, (r) => withStamp(r, result, key, nowSec()));
   } finally {
     stamping.delete(rk);
   }
   redraw();
-  // Only the new proof carrier: earlier failures wait for the player's Retry.
   const { pending } = store.get().claims[rk];
   if (pending) sendOwed(rk, [pending.id]);
-}
-
-/** Sign and send every ots-pending carrier the active key owes (stamped while another key was active). */
-function publishOwedCarriers() {
-  const key = store.get().key;
-  for (const record of recordsFor(store.get(), key?.pubkey)) {
-    const signed = withCarrier(record, key, nowSec());
-    if (signed === record) continue;
-    store.update((s) => putRecord(s, signed));
-    sendOwed(recordKey(record.run.id, record.claim.pubkey), [signed.pending.id]);
-  }
-}
-
-/** Finish pending proofs an hour or more old; publish the 1040 the moment Bitcoin attests. */
-async function upgradeProofs() {
-  const due = allRecords(store.get()).filter((r) => upgradeDue(r, Date.now()));
-  await Promise.all(due.map(async (record) => {
-    const rk = recordKey(record.run.id, record.claim.pubkey);
-    if (upgrading.has(rk)) return;
-    upgrading.add(rk);
-    try {
-      const { file } = await upgradeOts(decodeFile(record.ots.file));
-      updateRecord(rk, (r) => withUpgrade(r, file, Date.now(), RELAYS[0]));
-    } finally {
-      upgrading.delete(rk);
-    }
-    redraw();
-    const { final } = store.get().claims[rk];
-    if (final) sendOwed(rk, [final.id]);
-  }));
-}
-
-function download(rk) {
-  const record = store.get().claims[rk];
-  const url = URL.createObjectURL(new Blob([decodeFile(record.ots.file)], { type: 'application/octet-stream' }));
-  const a = Object.assign(document.createElement('a'), { href: url, download: `claim-${record.claim.id.slice(0, 12)}.ots` });
-  document.body.append(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 // ---------------------------------------------------------------- identity actions
@@ -656,7 +598,6 @@ document.addEventListener('click', (e) => {
     renderClaims();
   } else if (action === 'open') renderRecord(rk);
   else if (action === 'retry') work(rk ?? view.rk);
-  else if (action === 'download') download(rk);
   else if (action === 'copy') copy(JSON.stringify(view.run ?? store.get().claims[view.rk]?.run));
   else if (action === 'submit' && view.name === 'submit') submit(view.run);
   else if (action === 'forget') onForget();
@@ -676,5 +617,3 @@ document.addEventListener('click', (e) => {
 });
 window.addEventListener('hashchange', bootstrap);
 bootstrap();
-publishOwedCarriers();
-upgradeProofs();

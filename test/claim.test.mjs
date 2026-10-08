@@ -10,9 +10,9 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import {
-  claimTemplate, startRecord, plan, applyResults, submitStatus, recordKey, needsStamp, withStamp, withCarrier, upgradeDue, withUpgrade, finalWait, withProfile,
+  claimTemplate, startRecord, plan, applyResults, submitStatus, recordKey, withStamp, withProfile,
 } from '../src/claim.js';
-import { newStamp, applyOp, serializeOts, parseOts, bitcoinHeights, otsStatus } from '../src/ots.js';
+import { newStamp, applyOp, serializeOts, parseOts } from '../src/ots.js';
 import { openStore, setKey, putRecord, findRecord, recordsFor } from '../src/store.js';
 import { generatedKey, pastedKey, renameKey, profileName } from '../src/identity.js';
 import { generateSecretKey } from '../src/sign.js';
@@ -125,7 +125,7 @@ test('success: Run (duplicate counts) and Claim each on at least one relay', () 
     (ev.id === record.claim.id ? { ok: false, message: 'blocked' } : ok())));
   assert.deepEqual(submitStatus(noClaim, TARGETS).status.claim, 'failed');
   assert.equal(submitStatus(noClaim, TARGETS).submitted, false);
-  assert.equal(submitStatus(noClaim, TARGETS).needsRetry, true);
+  assert.equal(submitStatus(noClaim, TARGETS).relaysOwed, true);
 
   const noRun = applyResults(record, answer(plan(record, TARGETS), (ev) =>
     (ev.id === RUN.id ? { ok: false, message: 'invalid: created_at too early' } : ok())));
@@ -144,24 +144,17 @@ test('reload mid-Submit: unsent pairs are still owed, and finishing them converg
 
   const firstRelayOnly = applyResults(store.get().claims[k], answer(pairs.filter((p) => p.relay === 'wss://a'), ok));
   assert.equal(submitStatus(firstRelayOnly, TARGETS).submitted, true);
-  assert.equal(submitStatus(firstRelayOnly, TARGETS).needsRetry, true, 'pairs never sent are still owed');
+  assert.equal(submitStatus(firstRelayOnly, TARGETS).relaysOwed, true, 'pairs never sent are still owed');
 
   const after = openStore(storage);
   const record = after.get().claims[k];
-  assert.equal(submitStatus(record, TARGETS).needsRetry, true);
+  assert.equal(submitStatus(record, TARGETS).relaysOwed, true);
   const owed = plan(record, TARGETS);
   assert.deepEqual(owed.map((p) => p.event.id + p.relay), pairs.slice(4).map((p) => p.event.id + p.relay));
 
   const done = applyResults(record, answer(owed, ok));
   assert.deepEqual(plan(done, TARGETS), []);
-  assert.deepEqual(submitStatus(done, TARGETS), {
-    status: { profile: 'ok', run: 'ok', claim: 'ok' },
-    submitted: true,
-    relaysOwed: false,
-    stampOwed: true,
-    carrierOwed: false,
-    needsRetry: true,
-  }, 'every relay has it, but the Claim still owes a timestamp');
+  assert.deepEqual(submitStatus(done, TARGETS), { status: { profile: 'ok', run: 'ok', claim: 'ok' }, submitted: true, relaysOwed: false });
 });
 
 // ------------------------------------------------------------- store and keys
@@ -198,158 +191,34 @@ test('rename: a new kind-0, strictly newer than the last, same key', () => {
 
 // ------------------------------------------------------------- the Claim's timestamp proof
 
-const proofFor = (claimId, { bitcoin }) => {
+const proofFor = (claimId) => {
   const root = newStamp(new Uint8Array(Buffer.from(claimId, 'hex')));
   const pend = newStamp(applyOp({ tag: 0xf0, arg: new Uint8Array([1]) }, root.msg));
   pend.attestations.push({ type: 'pending', uri: 'https://alice.btc.calendar.opentimestamps.org' });
   root.ops.push({ op: { tag: 0xf0, arg: new Uint8Array([1]) }, stamp: pend });
-  if (bitcoin) {
-    const btc = newStamp(applyOp({ tag: 0x08 }, root.msg));
-    btc.attestations.push({ type: 'bitcoin', height: bitcoin });
-    root.ops.push({ op: { tag: 0x08 }, stamp: btc });
-  }
   return serializeOts(root);
 };
 
-test('stamped: the ots-pending carrier is signed by the claimer and joins the publish plan', () => {
+test('stamped at Submit: the ots-pending carrier is signed with the key captured then and joins the publish plan', () => {
   const key = generatedKey('Mario', 1);
   const record = startRecord(RUN, key, 2, RELAYS[0]);
-  assert.equal(needsStamp(record), true);
-  const file = proofFor(record.claim.id, {});
+  const file = proofFor(record.claim.id);
   const stamped = withStamp(record, { file, calendars: ['https://alice'], errors: { 'https://bob': 'HTTP 500' } }, key, 3);
-  assert.equal(needsStamp(stamped), false);
   assert.equal(stamped.pending.pubkey, key.pubkey);
   assert.equal(verifyEvent(stamped.pending), true);
   assert.deepEqual(stamped.pending.tags, [['t', 'ag-lb'], ['t', 'ots-pending'], ['e', record.claim.id]]);
-  assert.equal(stamped.pending.content, stamped.ots.file);
-  assert.deepEqual(stamped.ots.errors, { 'https://bob': 'HTTP 500' });
+  assert.equal(stamped.pending.content, Buffer.from(file).toString('base64'));
+  assert.deepEqual(stamped.ots, { calendars: ['https://alice'], errors: { 'https://bob': 'HTTP 500' } });
   assert.deepEqual(plan(stamped, TARGETS).filter((p) => p.event === stamped.pending).map((p) => p.relay), RELAYS);
-
-  const otherKey = withStamp(record, { file, calendars: ['https://alice'], errors: {} }, generatedKey('Luigi', 1), 3);
-  assert.equal(otherKey.pending, null, 'only the claimer signs its carrier');
-  assert.equal(needsStamp(otherKey), false);
 });
 
-test('stamped while another key is active: the carrier stays owed until the claimer key signs it', () => {
-  const claimer = generatedKey('Mario', 1);
-  const record = startRecord(RUN, claimer, 2, RELAYS[0]);
-  const sent = applyResults(record, answer(plan(record, TARGETS), ok));
-  const file = proofFor(record.claim.id, {});
-  const stamped = withStamp(sent, { file, calendars: ['https://alice'], errors: {} }, generatedKey('Luigi', 1), 3);
-  assert.equal(stamped.pending, null);
-  assert.equal(stamped.ots.file !== null, true, 'the proof is kept');
-  const owed = submitStatus(stamped, TARGETS);
-  assert.equal(owed.carrierOwed, true);
-  assert.equal(owed.needsRetry, true, 'an unsigned carrier is unfinished work');
-
-  assert.equal(withCarrier(stamped, generatedKey('Luigi', 1), 4), stamped, 'only the claimer can sign it');
-  assert.equal(withCarrier(stamped, null, 4), stamped);
-
-  const signed = withCarrier(stamped, claimer, 4);
-  assert.equal(signed.pending.pubkey, claimer.pubkey);
-  assert.equal(signed.pending.content, stamped.ots.file);
-  assert.equal(verifyEvent(signed.pending), true);
-  assert.equal(submitStatus(signed, TARGETS).carrierOwed, false);
-  assert.deepEqual(plan(signed, TARGETS).map((p) => [p.event.id, p.relay]), RELAYS.map((r) => [signed.pending.id, r]));
-  assert.equal(withCarrier(signed, claimer, 9), signed, 'signed once');
-});
-
-test('stamping failed everywhere: no proof, errors kept, still owed a stamp', () => {
+test('stamping failed everywhere: no carrier, errors kept, nothing owed (the finalizer stamps it)', () => {
   const key = generatedKey('Mario', 1);
   const record = withStamp(startRecord(RUN, key, 2, RELAYS[0]), { file: null, calendars: [], errors: { a: 'x' } }, key, 3);
   assert.equal(record.pending, null);
-  assert.equal(needsStamp(record), true);
   assert.deepEqual(record.ots.errors, { a: 'x' });
   const sent = applyResults(record, answer(plan(record, TARGETS), ok));
-  assert.equal(submitStatus(sent, TARGETS).relaysOwed, false);
-  assert.equal(submitStatus(sent, TARGETS).needsRetry, true, 'a failed stamp is unfinished work');
-});
-
-test('upgrade timing: an hour after the Claim, at most every 10 minutes, never after the 1040 exists', () => {
-  const key = generatedKey('Mario', 1);
-  const t0 = 1800000000;
-  const record = withStamp(startRecord(RUN, key, t0, RELAYS[0]), { file: proofFor('00'.repeat(32), {}), calendars: [], errors: {} }, key, t0);
-  assert.equal(upgradeDue(record, (t0 + 3599) * 1000), false);
-  assert.equal(upgradeDue(record, (t0 + 3600) * 1000), true);
-  const checked = { ...record, ots: { ...record.ots, lastUpgrade: (t0 + 3600) * 1000 } };
-  assert.equal(upgradeDue(checked, (t0 + 3600 + 599) * 1000), false);
-  assert.equal(upgradeDue(checked, (t0 + 3600 + 600) * 1000), true);
-  assert.equal(upgradeDue({ ...checked, final: {} }, (t0 + 9999) * 1000), false);
-});
-
-test('upgraded: a Bitcoin attestation yields a NIP-03 1040 of the pruned proof, signed by a throwaway key, once', () => {
-  const key = generatedKey('Mario', 1);
-  const record = startRecord(RUN, key, 2, RELAYS[0]);
-  const stillPending = withUpgrade(record, proofFor(record.claim.id, {}), 5000, RELAYS[0]);
-  assert.equal(stillPending.final, null);
-  assert.equal(stillPending.ots.lastUpgrade, 5000);
-
-  const done = withUpgrade(record, proofFor(record.claim.id, { bitcoin: 917000 }), 7200000, RELAYS[0]);
-  const { final } = done;
-  assert.equal(final.kind, 1040);
-  assert.equal(final.created_at, 7200);
-  assert.notEqual(final.pubkey, key.pubkey);
-  assert.equal(verifyEvent(final), true);
-  assert.deepEqual(final.tags, [['e', record.claim.id, RELAYS[0]], ['k', '8064']]);
-  const pruned = parseOts(Buffer.from(final.content, 'base64'));
-  assert.deepEqual(bitcoinHeights(pruned), [917000]);
-  assert.equal(pruned.ops.length, 1, 'pending branch pruned');
-  assert.equal(otsStatus(done.ots.file), 'complete');
-
-  assert.equal(withUpgrade(done, proofFor(record.claim.id, { bitcoin: 917000 }), 9999999, RELAYS[0]).final, final);
-  assert.deepEqual(plan(done, TARGETS).filter((p) => p.event === final).map((p) => p.relay), RELAYS);
-});
-
-const ALICE = 'https://alice.btc.calendar.opentimestamps.org';
-const BOB = 'https://bob.btc.calendar.opentimestamps.org';
-
-/** A stamped proof forking into one pending leaf per calendar; a height puts a Bitcoin attestation under that leaf. */
-const calendarProof = (claimId, heights) => {
-  const root = newStamp(new Uint8Array(Buffer.from(claimId, 'hex')));
-  Object.entries(heights).forEach(([uri, height], i) => {
-    const op = { tag: 0xf0, arg: new Uint8Array([i]) };
-    const leaf = newStamp(applyOp(op, root.msg));
-    leaf.attestations.push({ type: 'pending', uri });
-    if (height) {
-      const btc = newStamp(applyOp({ tag: 0x08 }, leaf.msg));
-      btc.attestations.push({ type: 'bitcoin', height });
-      leaf.ops.push({ op: { tag: 0x08 }, stamp: btc });
-    }
-    root.ops.push({ op, stamp: leaf });
-  });
-  return serializeOts(root);
-};
-
-test('k-of-n: the 1040 waits until every stamping calendar attests in Bitcoin, then carries every branch', () => {
-  const key = generatedKey('Mario', 1);
-  const t0 = 1800000000 * 1000;
-  const base = startRecord(RUN, key, 2, RELAYS[0]);
-  const record = withStamp(base, { file: calendarProof(base.claim.id, { [ALICE]: 0, [BOB]: 0 }), calendars: [ALICE, BOB], errors: {} }, key, 3);
-
-  const oneIn = withUpgrade(record, calendarProof(record.claim.id, { [ALICE]: 917000, [BOB]: 0 }), t0, RELAYS[0]);
-  assert.equal(oneIn.final, null, 'one calendar in Bitcoin is not enough while another may follow');
-  assert.equal(oneIn.ots.bitcoinSeenAt, t0);
-  assert.deepEqual(finalWait(oneIn), { attested: [ALICE], waiting: [BOB], until: t0 + 24 * 3600 * 1000 });
-  assert.equal(upgradeDue(oneIn, t0 + 600 * 1000), true, 'keeps asking the calendars');
-
-  const later = withUpgrade(oneIn, calendarProof(record.claim.id, { [ALICE]: 917000, [BOB]: 0 }), t0 + 3600 * 1000, RELAYS[0]);
-  assert.equal(later.ots.bitcoinSeenAt, t0, 'first sighting is kept');
-
-  const both = withUpgrade(later, calendarProof(record.claim.id, { [ALICE]: 917000, [BOB]: 917001 }), t0 + 7200 * 1000, RELAYS[0]);
-  assert.deepEqual(bitcoinHeights(parseOts(Buffer.from(both.final.content, 'base64'))).sort(), [917000, 917001]);
-  assert.equal(finalWait(both), null);
-});
-
-test('k-of-n: 24 h after the first Bitcoin attestation, the 1040 goes out with what is there', () => {
-  const key = generatedKey('Mario', 1);
-  const t0 = 1800000000 * 1000;
-  const base = startRecord(RUN, key, 2, RELAYS[0]);
-  const record = withStamp(base, { file: calendarProof(base.claim.id, { [ALICE]: 0, [BOB]: 0 }), calendars: [ALICE, BOB], errors: {} }, key, 3);
-  const aliceOnly = calendarProof(record.claim.id, { [ALICE]: 917000, [BOB]: 0 });
-  const oneIn = withUpgrade(record, aliceOnly, t0, RELAYS[0]);
-  assert.equal(withUpgrade(oneIn, aliceOnly, t0 + 24 * 3600 * 1000 - 1, RELAYS[0]).final, null);
-  const timedOut = withUpgrade(oneIn, aliceOnly, t0 + 24 * 3600 * 1000, RELAYS[0]);
-  assert.deepEqual(bitcoinHeights(parseOts(Buffer.from(timedOut.final.content, 'base64'))), [917000]);
+  assert.deepEqual(submitStatus(sent, TARGETS), { status: { profile: 'ok', run: 'ok', claim: 'ok' }, submitted: true, relaysOwed: false });
 });
 
 test('Change name: the next Submit or Retry of an existing record publishes the renamed kind-0', () => {
