@@ -68,8 +68,8 @@ npm run build   # -> dist/
 To test on a real phone you need HTTPS: deploy, or tunnel the dev server.
 
 `SCANNER_RELAYS` and `SCANNER_INDEXERS` (comma-separated `ws://` URLs) replace the relay lists at build time.
-They exist for local end-to-end runs; the relay lists never come from the URL. `npm run e2e` leaves `dist/`
-built against its local relays, so run `npm run build` before deploying by hand.
+They exist for local end-to-end runs; the relay lists never come from the URL. `npm run e2e` uses them, then
+rebuilds `dist/` with the real relays.
 
 ## Deploy
 

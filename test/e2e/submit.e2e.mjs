@@ -6,8 +6,7 @@
  * Builds the page with SCANNER_RELAYS / SCANNER_INDEXERS pointing at two
  * local relays started here, so nothing reaches a public relay (asserted:
  * every WebSocket the page opens is local). OpenTimestamps calendars are
- * the real ones. Leaves dist/ built against the local relays; run
- * `npm run build` afterwards before deploying by hand.
+ * the real ones. dist/ is rebuilt with the real relays on the way out.
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -235,4 +234,8 @@ try {
   server.close();
   relay.wss.close();
   indexer.wss.close();
+  const env = { ...process.env };
+  delete env.SCANNER_RELAYS;
+  delete env.SCANNER_INDEXERS;
+  spawnSync('node', ['scripts/build.mjs'], { cwd: root, env });
 }
