@@ -1,8 +1,8 @@
 /*
  * sign.js -- the only file that may hold a secret key or produce a
- * signature (a test enforces this). It signs the player's own events: the
+ * signature (a test enforces this). It signs the player's own events (the
  * kind-0 profile of a key generated here, the Claim, the ots-pending proof
- * carrier, and the NIP-03 kind-1040 proof.
+ * carrier) and the finalizer's (ots-pending, NIP-03 kind-1040 proof).
  *
  * The Run is never signed, built, or modified here: signEvent refuses any
  * template nostr-leaderboard's parseRun could take for a Run (kind 8064 with
