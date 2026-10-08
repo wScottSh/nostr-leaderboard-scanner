@@ -1,0 +1,125 @@
+#!/usr/bin/env node
+/*
+ * The finalizer: one pass over the leaderboard relays that finishes every
+ * recent Claim's Bitcoin timestamp, so a player can Submit and walk away.
+ *
+ *   node finalizer/run.mjs [--dry-run]
+ *
+ * Relays are the only state. Each pass reads the last week's Claims,
+ * ots-pending carriers and NIP-03 kind-1040s, then per Claim (src/finalize.js):
+ * stamps it if no proof was ever published, upgrades its pending proof at
+ * the calendars and publishes the 1040 once ready, or does nothing. A second
+ * pass right after finds the 1040 and publishes nothing.
+ *
+ * FINALIZER_KEY_FILE   hex secret key that signs the 1040s and fallback
+ *                      ots-pendings; created (0600) if missing. Default ./finalizer.key
+ * FINALIZER_RELAYS, FINALIZER_CALENDARS   comma-separated overrides, for tests only.
+ *
+ * --dry-run prints each decision, asks the calendars (GET only), and
+ * publishes, stamps and writes nothing.
+ */
+import { readFileSync, writeFileSync } from 'node:fs';
+import { RELAYS as DEFAULT_RELAYS, fetchEvents, publishPairs } from '../src/relay.js';
+import { CALENDARS as DEFAULT_CALENDARS, stampDigest, upgradeOts } from '../src/ots.js';
+import { generateSecretKey, pubkeyOf } from '../src/sign.js';
+import {
+  indexEvents, decide, mergeFiles, pendingCalendars, readiness, finalEvent, pendingEvent,
+} from '../src/finalize.js';
+
+const DAY = 86400;
+const ID_CHUNK = 100;
+const CONCURRENCY = 8;
+const READ = { timeoutMs: 15_000 };
+
+const list = (env, fallback) => (process.env[env] ? process.env[env].split(',').map((s) => s.trim()).filter(Boolean) : fallback);
+const RELAYS = list('FINALIZER_RELAYS', DEFAULT_RELAYS);
+const CALENDARS = list('FINALIZER_CALENDARS', DEFAULT_CALENDARS);
+const dryRun = process.argv.includes('--dry-run');
+const nowSec = () => Math.floor(Date.now() / 1000);
+const short = (id) => id.slice(0, 12);
+const host = (u) => new URL(u).host;
+const log = (...parts) => console.log(parts.join(' '));
+
+function loadKey(file) {
+  try {
+    const sk = readFileSync(file, 'utf8').trim();
+    pubkeyOf(sk);
+    return sk;
+  } catch (e) {
+    if (e.code !== 'ENOENT') throw new Error(`${file}: ${e.message}`);
+  }
+  const sk = generateSecretKey();
+  writeFileSync(file, `${sk}\n`, { mode: 0o600, flag: 'wx' });
+  log('key: created', file);
+  return sk;
+}
+
+const chunks = (xs, n) => Array.from({ length: Math.ceil(xs.length / n) }, (_, i) => xs.slice(i * n, i * n + n));
+
+async function readRelays(now) {
+  const recent = await Promise.all([
+    fetchEvents(RELAYS, { kinds: [8064], '#t': ['claim'], since: now - 7 * DAY }, READ),
+    fetchEvents(RELAYS, { kinds: [8064], '#t': ['ots-pending'], since: now - 7 * DAY }, READ),
+    fetchEvents(RELAYS, { kinds: [1040], '#k': ['8064'], since: now - 8 * DAY }, READ),
+  ]);
+  const first = indexEvents(recent.flat());
+  // Some relays don't index #k: ask for the 1040s of every Claim not yet done by #e too.
+  const open = [...first].filter(([, entry]) => !entry.finals.length).map(([id]) => id);
+  const byE = await Promise.all(chunks(open, ID_CHUNK).map((ids) => fetchEvents(RELAYS, { kinds: [1040], '#e': ids }, READ)));
+  return indexEvents([...recent.flat(), ...byE.flat()]);
+}
+
+/** Publishes one event everywhere -> "accepted k/n" for the log. */
+async function publish(event) {
+  const results = await publishPairs(RELAYS.map((relay) => ({ event, relay })));
+  const ok = results.filter((r) => r.ok);
+  const failed = results.filter((r) => !r.ok).map((r) => `${host(r.relay)}: ${r.message}`);
+  return `accepted ${ok.length}/${RELAYS.length}${failed.length ? ` (${failed.join('; ')})` : ''}`;
+}
+
+async function stamp(claimId, now, sk) {
+  if (dryRun) return log('stamp', short(claimId), 'dry-run: would stamp at', CALENDARS.map(host).join(','));
+  const { file, calendars, errors } = await stampDigest(claimId, { calendars: CALENDARS });
+  const errs = Object.entries(errors).map(([c, m]) => `${host(c)}: ${m}`).join('; ');
+  if (!file) return log('stamp', short(claimId), 'failed:', errs);
+  const event = pendingEvent(claimId, file, now, sk);
+  log('stamp', short(claimId), `at ${calendars.map(host).join(',')}${errs ? ` (failed ${errs})` : ''};`,
+    'ots-pending', short(event.id), await publish(event));
+}
+
+async function upgrade(claimId, entry, files, now, sk) {
+  const merged = mergeFiles(files);
+  const { file } = await upgradeOts(merged, { calendars: CALENDARS });
+  const { ready, attested, waiting } = readiness(file, pendingCalendars(merged), entry.claim.created_at, now);
+  const status = `bitcoin: ${attested.map(host).join(',') || 'none'}; waiting: ${waiting.map(host).join(',') || 'none'}`;
+  if (!ready) return log('upgrade', short(claimId), 'not ready;', status);
+  if (dryRun) return log('upgrade', short(claimId), 'dry-run: would publish 1040;', status);
+  const event = finalEvent(claimId, file, RELAYS[0], now, sk);
+  log('upgrade', short(claimId), `1040 ${short(event.id)};`, status + ';', await publish(event));
+}
+
+async function main() {
+  const now = nowSec();
+  const sk = dryRun ? null : loadKey(process.env.FINALIZER_KEY_FILE ?? 'finalizer.key');
+  const entries = await readRelays(now);
+  const decisions = [...entries].map(([id, entry]) => ({ id, entry, decision: decide(entry, now) }));
+  const count = (k) => decisions.filter((d) => d.decision.kind === k).length;
+  log(`${dryRun ? 'dry-run ' : ''}relays=${RELAYS.map(host).join(',')}`, `claims=${entries.size}`,
+    `done=${count('done')} upgrade=${count('upgrade')} stamp=${count('stamp')} skip=${count('skip')}`,
+    sk ? `key=${pubkeyOf(sk).slice(0, 12)}` : '');
+  const queue = [...decisions];
+  const worker = async () => {
+    for (let d = queue.shift(); d; d = queue.shift()) {
+      const { id, entry, decision } = d;
+      if (decision.kind === 'stamp') await stamp(id, now, sk);
+      else if (decision.kind === 'upgrade') await upgrade(id, entry, decision.files, now, sk);
+      else if (dryRun) log(decision.kind, short(id), decision.reason ?? '');
+    }
+  };
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+}
+
+main().then(() => process.exit(0), (e) => {
+  console.error('finalizer bug:', e.stack || e);
+  process.exit(1);
+});

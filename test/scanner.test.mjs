@@ -157,10 +157,10 @@ test('links: deep link matches nostr-leaderboard hash routes', () => {
 
 // ------------------------------------------------------------- invariant
 
-test('the Run is never signed here: only src/sign.js touches the signing API', () => {
-  const dir = path.join(here, '..', 'src');
-  const signing = readdirSync(dir)
-    .filter((n) => n.endsWith('.js'))
-    .filter((f) => /schnorr\.sign\b|\.sign\(|getPublicKey|randomSecretKey|randomPrivateKey/.test(readFileSync(path.join(dir, f), 'utf8')));
-  assert.deepEqual(signing, ['sign.js']);
+test('the Run is never signed here: only src/sign.js touches the signing API (page and finalizer)', () => {
+  const signing = ['src', 'finalizer'].flatMap((d) => readdirSync(path.join(here, '..', d))
+    .filter((n) => /\.m?js$/.test(n))
+    .map((n) => `${d}/${n}`))
+    .filter((f) => /schnorr\.sign\b|\.sign\(|getPublicKey|randomSecretKey|randomPrivateKey/.test(readFileSync(path.join(here, '..', f), 'utf8')));
+  assert.deepEqual(signing, ['src/sign.js']);
 });
