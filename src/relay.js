@@ -84,13 +84,16 @@ export async function publishPairs(pairs, onResult = () => {}, opts = {}) {
 }
 
 /**
- * fetchEvents: REQ filter on every relay, collecting events until each
- * sends EOSE, fails, or times out. Never rejects; unreachable relays just
- * contribute nothing.
+ * queryRelays: REQ filter on every relay, collecting events until each
+ * sends EOSE, fails, or times out -> { events, answered }, where answered
+ * counts the relays that reached EOSE. Never rejects; unreachable relays
+ * just contribute nothing, so answered is how a caller tells "no events"
+ * from "nobody replied".
  */
-export async function fetchEvents(urls, filter, { timeoutMs = 5000, WebSocketImpl = globalThis.WebSocket } = {}) {
+export async function queryRelays(urls, filter, { timeoutMs = 5000, WebSocketImpl = globalThis.WebSocket } = {}) {
   const perRelay = await Promise.all(urls.map((url) => new Promise((resolve) => {
     const events = [];
+    let eose = false;
     let ws;
     let done = false;
     const sub = 'scan';
@@ -102,7 +105,7 @@ export async function fetchEvents(urls, filter, { timeoutMs = 5000, WebSocketImp
         ws?.send(JSON.stringify(['CLOSE', sub]));
         ws?.close();
       } catch { /* already closed */ }
-      resolve(events);
+      resolve({ events, eose });
     };
     const timer = setTimeout(finish, timeoutMs);
     try {
@@ -121,10 +124,16 @@ export async function fetchEvents(urls, filter, { timeoutMs = 5000, WebSocketImp
       }
       if (done || !Array.isArray(data) || data[1] !== sub) return;
       if (data[0] === 'EVENT' && data[2] && typeof data[2] === 'object') events.push(data[2]);
-      else if (data[0] === 'EOSE' || data[0] === 'CLOSED') finish();
+      else if (data[0] === 'EOSE' || data[0] === 'CLOSED') {
+        eose = data[0] === 'EOSE';
+        finish();
+      }
     };
     ws.onerror = finish;
     ws.onclose = finish;
   })));
-  return perRelay.flat();
+  return { events: perRelay.flatMap((r) => r.events), answered: perRelay.filter((r) => r.eose).length };
 }
+
+/** queryRelays' events alone, for reads where silence is just "nothing found". */
+export const fetchEvents = async (urls, filter, opts) => (await queryRelays(urls, filter, opts)).events;

@@ -110,3 +110,22 @@ test('a Claim whose page closed before stamping gets one ots-pending from the fi
     await Promise.all([relay.close(), cal.close()]);
   }
 });
+
+test('a pass where a read got no answer from any relay publishes nothing', async () => {
+  const [relay, cal] = await Promise.all([startRelay('no-pendings', { drop: (f) => f['#t']?.[0] === 'ots-pending' }), startCalendar()]);
+  try {
+    const claimer = generateSecretKey();
+    const claim = signEvent(claimTemplate(RUN, nowSec() - 900, relay.url), claimer);
+    const { file } = await stampDigest(claim.id, { calendars: [cal.url] });
+    for (const ev of [RUN, claim, pendingEvent(claim.id, file, claim.created_at, claimer)]) relay.stored.set(ev.id, ev);
+    const requests = cal.requests.length;
+
+    const run = await finalize({ relays: [relay.url], calendars: [cal.url], keyFile: keyFile() });
+    assert.equal(run.code, 0, run.out);
+    assert.match(run.out, /abort: no relay answered the ots-pending read/);
+    assert.equal(relay.received.length, 0, 'no second ots-pending for a Claim whose pending could not be read');
+    assert.equal(cal.requests.length, requests, 'no stamp requested');
+  } finally {
+    await Promise.all([relay.close(), cal.close()]);
+  }
+});

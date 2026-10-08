@@ -3,7 +3,8 @@
  *
  * reject(ev, attempt) may return a rejection message. unindexed lists tag
  * letters this relay doesn't index: a filter on one matches nothing, the
- * way some public relays treat #k.
+ * way some public relays treat #k. drop(filter) true makes the relay hang up
+ * on that REQ before EOSE, the way a failing relay does.
  */
 import { WebSocketServer } from 'ws';
 
@@ -17,7 +18,7 @@ function matches(filter, ev, unindexed) {
     !unindexed.includes(k.slice(1)) && ev.tags.some((t) => t[0] === k.slice(1) && values.includes(t[1])));
 }
 
-export function startRelay(name, { reject = () => null, unindexed = [] } = {}) {
+export function startRelay(name, { reject = () => null, unindexed = [], drop = () => false } = {}) {
   const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   const relay = { name, received: [], stored: new Map(), attempts: new Map(), wss };
   wss.on('connection', (ws) => {
@@ -36,6 +37,7 @@ export function startRelay(name, { reject = () => null, unindexed = [] } = {}) {
         ws.send(JSON.stringify(['OK', ev.id, true, dup ? 'duplicate: already have this event' : '']));
       } else if (msg[0] === 'REQ') {
         const [, sub, ...filters] = msg;
+        if (filters.some(drop)) return ws.terminate();
         for (const ev of relay.stored.values()) {
           if (filters.some((f) => matches(f, ev, unindexed))) ws.send(JSON.stringify(['EVENT', sub, ev]));
         }

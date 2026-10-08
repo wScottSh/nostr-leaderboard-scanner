@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { publishToRelay, publishPairs, fetchEvents, RELAYS, INDEXERS } from '../src/relay.js';
+import { publishToRelay, publishPairs, fetchEvents, queryRelays, RELAYS, INDEXERS } from '../src/relay.js';
 
 const ev = (n) => ({ id: String(n).repeat(64).slice(0, 64), kind: 1 });
 const A = ev(1);
@@ -95,4 +95,17 @@ test('fetchEvents: collects EVENTs from every relay until EOSE', async () => {
   });
   const got = await fetchEvents(['wss://i1', 'wss://i2'], { kinds: [0], authors: ['ab'] }, { WebSocketImpl: FakeWS });
   assert.deepEqual(got.map((e) => e.id).sort(), ['wss://i1', 'wss://i2']);
+});
+
+test('queryRelays: answered counts only relays that reached EOSE, not ones that refused or never replied', async () => {
+  reset(([type, sub], url) => {
+    if (type !== 'REQ') return [];
+    if (url === 'wss://ok') return [['EVENT', sub, { id: 'x' }], ['EOSE', sub]];
+    if (url === 'wss://refuses') return [['CLOSED', sub, 'auth-required:']];
+    return [];
+  });
+  const got = await queryRelays(['wss://ok', 'wss://refuses', 'wss://silent'], { kinds: [1] }, { WebSocketImpl: FakeWS, timeoutMs: 50 });
+  assert.deepEqual(got, { events: [{ id: 'x' }], answered: 1 });
+  reset(() => []);
+  assert.deepEqual(await queryRelays(['wss://silent'], { kinds: [1] }, { WebSocketImpl: FakeWS, timeoutMs: 50 }), { events: [], answered: 0 });
 });

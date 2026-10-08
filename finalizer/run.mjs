@@ -19,7 +19,7 @@
  * publishes, stamps and writes nothing.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
-import { RELAYS as DEFAULT_RELAYS, fetchEvents, publishPairs } from '../src/relay.js';
+import { RELAYS as DEFAULT_RELAYS, queryRelays, publishPairs } from '../src/relay.js';
 import { CALENDARS as DEFAULT_CALENDARS, stampDigest, upgradeOts } from '../src/ots.js';
 import { generateSecretKey, pubkeyOf } from '../src/sign.js';
 import {
@@ -56,16 +56,30 @@ function loadKey(file) {
 
 const chunks = (xs, n) => Array.from({ length: Math.ceil(xs.length / n) }, (_, i) => xs.slice(i * n, i * n + n));
 
+/**
+ * One REQ to every relay -> its events, or null when no relay reached EOSE.
+ * Acting on a read nobody answered would republish what is already there.
+ */
+async function read(what, filter) {
+  const { events, answered } = await queryRelays(RELAYS, filter, READ);
+  if (answered) return events;
+  log(`abort: no relay answered the ${what} read; publishing nothing this pass`);
+  return null;
+}
+
+/** Every recent Claim's entry, or null if any read went unanswered. */
 async function readRelays(now) {
   const recent = await Promise.all([
-    fetchEvents(RELAYS, { kinds: [8064], '#t': ['claim'], since: now - 7 * DAY }, READ),
-    fetchEvents(RELAYS, { kinds: [8064], '#t': ['ots-pending'], since: now - 7 * DAY }, READ),
-    fetchEvents(RELAYS, { kinds: [1040], '#k': ['8064'], since: now - 8 * DAY }, READ),
+    read('claim', { kinds: [8064], '#t': ['claim'], since: now - 7 * DAY }),
+    read('ots-pending', { kinds: [8064], '#t': ['ots-pending'], since: now - 7 * DAY }),
+    read('1040', { kinds: [1040], '#k': ['8064'], since: now - 8 * DAY }),
   ]);
+  if (recent.includes(null)) return null;
   const first = indexEvents(recent.flat());
   // Some relays don't index #k: ask for the 1040s of every Claim not yet done by #e too.
   const open = [...first].filter(([, entry]) => !entry.finals.length).map(([id]) => id);
-  const byE = await Promise.all(chunks(open, ID_CHUNK).map((ids) => fetchEvents(RELAYS, { kinds: [1040], '#e': ids }, READ)));
+  const byE = await Promise.all(chunks(open, ID_CHUNK).map((ids) => read('1040 by #e', { kinds: [1040], '#e': ids })));
+  if (byE.includes(null)) return null;
   return indexEvents([...recent.flat(), ...byE.flat()]);
 }
 
@@ -102,6 +116,7 @@ async function main() {
   const now = nowSec();
   const sk = dryRun ? null : loadKey(process.env.FINALIZER_KEY_FILE ?? 'finalizer.key');
   const entries = await readRelays(now);
+  if (!entries) return;
   const decisions = [...entries].map(([id, entry]) => ({ id, entry, decision: decide(entry, now) }));
   const count = (k) => decisions.filter((d) => d.decision.kind === k).length;
   log(`${dryRun ? 'dry-run ' : ''}relays=${RELAYS.map(host).join(',')}`, `claims=${entries.size}`,
