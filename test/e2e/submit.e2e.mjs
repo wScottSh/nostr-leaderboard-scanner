@@ -210,6 +210,23 @@ try {
   await page.waitForTimeout(500);
   assert.equal(relay.received.length, sent, 'nothing re-sent on re-scan');
 
+  console.log('4b. Change name, then Retry on the already-claimed Run: the new kind-0 goes out');
+  await page.goto(singleFrameUrl(base, tampered));
+  await page.reload();
+  await page.getByRole('button', { name: 'Change name' }).click();
+  await page.locator('#rename').fill('Wario');
+  await page.getByRole('button', { name: 'Save name' }).click();
+  await page.getByRole('button', { name: 'Wario · Submit' }).waitFor();
+  await page.goto(singleFrameUrl(base, packed));
+  await page.reload();
+  await page.getByText('Claimed as').waitFor();
+  const beforeRename = relay.received.length;
+  await page.getByRole('button', { name: 'Retry failed' }).click();
+  const renamedAt = (r) => r.received.some(({ ev }) => ev.kind === 0 && JSON.parse(ev.content).name === 'Wario');
+  await waitFor('the renamed kind-0 at the relay and the indexer', () => renamedAt(relay) && renamedAt(indexer), 15000);
+  assert.deepEqual(relay.received.slice(beforeRename).map(({ ev }) => ev.kind), [0], 'only the new kind-0 was sent');
+  log('renamed kind-0 published on Retry');
+
   console.log('5. pasted nsec on a fresh phone: name from the indexer, no kind-0 published');
   const phone2 = await newPage(await browser.newContext());
   await phone2.goto(singleFrameUrl(base, packed));

@@ -22,7 +22,7 @@ import {
   parseIdentityInput, validateName, generatedKey, pastedKey, renameKey, newestProfile, profileName, keyLabel, shortNpub,
 } from './identity.js';
 import {
-  recordKey, startRecord, destinations, plan, applyResults, submitStatus, needsStamp, withStamp, withCarrier, upgradeDue, withUpgrade, finalWait,
+  recordKey, startRecord, destinations, plan, applyResults, submitStatus, needsStamp, withStamp, withCarrier, withProfile, upgradeDue, withUpgrade, finalWait,
 } from './claim.js';
 import { stampDigest, upgradeOts, otsStatus, decodeFile, parseOts, bitcoinHeights } from './ots.js';
 
@@ -401,10 +401,11 @@ function startSubmit(run) {
   work(rk);
 }
 
-/** A Retry tap would do something: resend, restamp, or sign the owed carrier with the active key. */
+/** A Retry tap would do something: resend, restamp, sign the owed carrier, or publish a changed name. */
 function canRetry(record) {
+  const key = store.get().key;
   const { relaysOwed, stampOwed, carrierOwed } = submitStatus(record, TARGETS);
-  return relaysOwed || stampOwed || (carrierOwed && store.get().key?.pubkey === record.claim.pubkey);
+  return relaysOwed || stampOwed || (carrierOwed && key?.pubkey === record.claim.pubkey) || withProfile(record, key) !== record;
 }
 
 const isBusy = (rk) => {
@@ -416,7 +417,7 @@ const updateRecord = (rk, fn) => store.update((s) => putRecord(s, fn(s.claims[rk
 
 /** Everything a Claim still owes: unsent or failed (event, relay) pairs, and a stamp if it has none. */
 function work(rk) {
-  updateRecord(rk, (r) => withCarrier(r, store.get().key, nowSec()));
+  updateRecord(rk, (r) => withCarrier(withProfile(r, store.get().key), store.get().key, nowSec()));
   sendOwed(rk);
   if (needsStamp(store.get().claims[rk])) stamp(rk);
 }

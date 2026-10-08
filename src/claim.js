@@ -9,7 +9,7 @@
  *
  * ClaimRecord = {
  *   run, claim,               the cabinet's Run (verbatim) and the player's Claim
- *   profile,                  kind-0 of a key generated here, else null
+ *   profile,                  latest kind-0 of a key generated here (see withProfile), else null
  *   pending,                  ots-pending carrier, once stamped and signed by the claimer key
  *   final,                    NIP-03 kind-1040, once Bitcoin attests
  *   sends: { [eventId]: { [relay]: { state: 'ok'|'error', message } } },   absent = not yet sent
@@ -62,6 +62,17 @@ export function startRecord(run, key, createdAt, relayHint) {
     claim: signEvent(claimTemplate(run, createdAt, relayHint), key.sk),
     profile: key.origin === 'generated' ? key.profile : null,
   });
+}
+
+/**
+ * Points the record at the active generated key's latest kind-0, so a
+ * Change name goes out with the next Submit or Retry of any Claim, not only
+ * new ones. Unchanged for any other key, or when the name is unchanged.
+ */
+export function withProfile(record, key) {
+  if (key?.origin !== 'generated' || key.pubkey !== record.claim.pubkey || !key.profile) return record;
+  if (record.profile && record.profile.created_at >= key.profile.created_at) return record;
+  return { ...record, profile: key.profile };
 }
 
 /** Which relays each stored event goes to. Indexers only want the profile. */

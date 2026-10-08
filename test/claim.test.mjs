@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import {
-  claimTemplate, startRecord, plan, applyResults, submitStatus, recordKey, needsStamp, withStamp, withCarrier, upgradeDue, withUpgrade, finalWait,
+  claimTemplate, startRecord, plan, applyResults, submitStatus, recordKey, needsStamp, withStamp, withCarrier, upgradeDue, withUpgrade, finalWait, withProfile,
 } from '../src/claim.js';
 import { newStamp, applyOp, serializeOts, parseOts, bitcoinHeights, otsStatus } from '../src/ots.js';
 import { openStore, setKey, putRecord, findRecord, recordsFor } from '../src/store.js';
@@ -350,4 +350,22 @@ test('k-of-n: 24 h after the first Bitcoin attestation, the 1040 goes out with w
   assert.equal(withUpgrade(oneIn, aliceOnly, t0 + 24 * 3600 * 1000 - 1, RELAYS[0]).final, null);
   const timedOut = withUpgrade(oneIn, aliceOnly, t0 + 24 * 3600 * 1000, RELAYS[0]);
   assert.deepEqual(bitcoinHeights(parseOts(Buffer.from(timedOut.final.content, 'base64'))), [917000]);
+});
+
+test('Change name: the next Submit or Retry of an existing record publishes the renamed kind-0', () => {
+  const key = generatedKey('Mario', 1000);
+  const record = startRecord(RUN, key, 1001, RELAYS[0]);
+  const sent = applyResults(record, answer(plan(record, TARGETS), ok));
+  assert.deepEqual(plan(sent, TARGETS), []);
+
+  const renamed = renameKey(key, 'Wario', 2000);
+  const refreshed = withProfile(sent, renamed);
+  assert.equal(profileName(refreshed.profile), 'Wario');
+  assert.deepEqual(plan(refreshed, TARGETS).map((p) => [p.event.id, p.relay]),
+    [...RELAYS, ...INDEXERS].map((r) => [renamed.profile.id, r]), 'only the new kind-0 is owed');
+  assert.equal(withProfile(refreshed, renamed), refreshed, 'idempotent');
+
+  assert.equal(withProfile(sent, key), sent, 'an unchanged name owes nothing');
+  assert.equal(withProfile(sent, renameKey(generatedKey('Luigi', 1), 'Luigi', 5)), sent, 'another key never touches it');
+  assert.equal(withProfile(sent, null), sent);
 });
