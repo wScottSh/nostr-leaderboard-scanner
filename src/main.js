@@ -23,7 +23,7 @@ import {
   parseIdentityInput, validateName, generatedKey, pastedKey, renameKey, newestProfile, profileName, keyLabel, shortNpub,
 } from './identity.js';
 import {
-  recordKey, startRecord, destinations, plan, applyResults, submitStatus, withStamp, withProfile,
+  recordKey, startRecord, destinations, plan, applyResults, submitStatus, canWalkAway, withStamp, withProfile,
 } from './claim.js';
 import { stampDigest } from './ots.js';
 
@@ -264,7 +264,7 @@ function renderLive() {
   const live = document.getElementById('live');
   if (!live || view.name !== 'record') return;
   const record = store.get().claims[view.rk];
-  const { submitted } = submitStatus(record, TARGETS);
+  const done = canWalkAway(record, TARGETS, stamping.has(view.rk));
   const busy = isBusy(view.rk);
   const retryable = !busy && canRetry(record);
   const check = checkRun(record.run);
@@ -277,7 +277,7 @@ function renderLive() {
         const c = cellView(record, event.id, relay);
         return `<li class="${c.cls}" data-event="${esc(event.id)}" data-relay="${esc(relay)}">${esc(relayName(relay))}<span class="msg">${esc(c.text)}</span></li>`;
       }).join('')}</ul>`).join('')}
-    <p id="publish-summary" class="${submitted ? 'good' : 'sub'}">${esc(publishSummary(record, busy))}</p>
+    <p id="publish-summary" class="${done ? 'good' : 'sub'}">${esc(publishSummary(record, view.rk))}</p>
     <p id="ots-status" class="sub">${esc(otsLine(record, view.rk))}</p>
     <div class="actions">
       ${retryable ? '<button class="secondary" data-action="retry">Retry failed</button>' : ''}
@@ -287,16 +287,17 @@ function renderLive() {
     </div>`;
 }
 
-function publishSummary(record, busy) {
-  const { status, submitted } = submitStatus(record, TARGETS);
-  if (submitted) {
+function publishSummary(record, rk) {
+  const { status } = submitStatus(record, TARGETS);
+  if (canWalkAway(record, TARGETS, stamping.has(rk))) {
     const dup = Object.values(record.sends[record.run.id] ?? {}).some((c) => c.state === 'ok' && c.message.startsWith('duplicate'));
-    return `Submitted. The Run and your Claim are on the leaderboard's relays; they appear on its next refresh.${
-      dup ? ' A relay already had this Run (maybe someone submitted it first); your Claim is what makes it yours.' : ''}`;
+    return 'Done. You can close this page. Your Bitcoin timestamp finishes on its own in a few hours.'
+      + `${dup ? ' A relay already had this Run (maybe someone submitted it first); your Claim is what makes it yours.' : ''}`;
   }
-  if (busy) return 'Submitting…';
-  const missing = [status.run !== 'ok' && 'the Run', status.claim !== 'ok' && 'your Claim'].filter(Boolean).join(' and ');
-  return `Not submitted yet: no relay accepted ${missing}. Retry when you have signal.`;
+  if (isBusy(rk)) return 'Saving… keep this page open a few seconds.';
+  const missing = [status.run !== 'ok' && 'the Run', status.claim !== 'ok' && 'your Claim', status.pending && status.pending !== 'ok' && 'the timestamp request']
+    .filter(Boolean).join(' and ');
+  return `Not saved yet: no relay accepted ${missing}. Retry when you have signal.`;
 }
 
 function otsLine(record, rk) {
@@ -329,15 +330,16 @@ function renderClaimsList() {
   list.innerHTML = allRecords(store.get()).map((record) => {
     const rk = recordKey(record.run.id, record.claim.pubkey);
     const content = safeJson(record.run.content) ?? {};
-    const { submitted, relaysOwed } = submitStatus(record, TARGETS);
+    const { relaysOwed } = submitStatus(record, TARGETS);
+    const done = canWalkAway(record, TARGETS, stamping.has(rk));
     const busy = isBusy(rk);
     return `
       <div class="claim" data-rk="${esc(rk)}">
         <h3><span class="star">★</span> ${esc(starName(content.course, content.keyId))} · ${formatFrames(content.frames)}</h3>
         <p class="sub">${esc(courseName(content.course))} · as ${esc(claimerLabel(record))}
           · ${new Date(record.claim.created_at * 1000).toLocaleString()}</p>
-        <p class="${submitted ? 'good' : 'notice'}">${esc(busy ? 'Submitting…' : submitted
-          ? (relaysOwed ? 'Submitted; some relays still owe a copy.' : 'Submitted.') : publishSummary(record, false))}</p>
+        <p class="${done ? 'good' : 'notice'}">${esc(done
+          ? (relaysOwed ? 'Submitted; some relays still owe a copy.' : 'Submitted.') : publishSummary(record, rk))}</p>
         <p class="sub">${esc(otsLine(record, rk))}</p>
         <p>
           <button class="link" data-action="open" data-rk="${esc(rk)}">Details</button>

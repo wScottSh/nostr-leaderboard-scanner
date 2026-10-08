@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import {
-  claimTemplate, startRecord, plan, applyResults, submitStatus, recordKey, withStamp, withProfile,
+  claimTemplate, startRecord, plan, applyResults, submitStatus, canWalkAway, recordKey, withStamp, withProfile,
 } from '../src/claim.js';
 import { newStamp, applyOp, serializeOts, parseOts } from '../src/ots.js';
 import { openStore, setKey, putRecord, findRecord, recordsFor } from '../src/store.js';
@@ -219,6 +219,26 @@ test('stamping failed everywhere: no carrier, errors kept, nothing owed (the fin
   assert.deepEqual(record.ots.errors, { a: 'x' });
   const sent = applyResults(record, answer(plan(record, TARGETS), ok));
   assert.deepEqual(submitStatus(sent, TARGETS), { status: { profile: 'ok', run: 'ok', claim: 'ok' }, submitted: true, relaysOwed: false });
+});
+
+test('walk away: once the Run, the Claim and the ots-pending are each on a relay, or stamping produced nothing to send', () => {
+  const key = generatedKey('Mario', 1);
+  const record = startRecord(RUN, key, 2, RELAYS[0]);
+  const sent = applyResults(record, answer(plan(record, TARGETS), (ev, relay) => (relay === 'wss://a' ? ok() : { ok: false, message: 'timed out' })));
+  assert.equal(canWalkAway(sent, TARGETS, true), false, 'not while the calendars are still being asked');
+  assert.equal(canWalkAway(sent, TARGETS, false), true, 'no carrier to send (stamping failed or a reload cut it): the finalizer stamps it');
+
+  const stamped = withStamp(sent, { file: proofFor(record.claim.id), calendars: ['https://alice'], errors: {} }, key, 3);
+  assert.equal(canWalkAway(stamped, TARGETS, false), false, 'the ots-pending is not on any relay yet');
+  const refused = applyResults(stamped, answer(plan(stamped, TARGETS).filter((p) => p.event === stamped.pending), () => ({ ok: false, message: 'blocked' })));
+  assert.equal(canWalkAway(refused, TARGETS, false), false);
+  const carried = applyResults(refused, [{ eventId: stamped.pending.id, relay: 'wss://c', ok: true, message: '' }]);
+  assert.equal(canWalkAway(carried, TARGETS, false), true);
+
+  const noClaim = applyResults(record, answer(plan(record, TARGETS), (ev) => (ev.id === record.claim.id ? { ok: false, message: 'blocked' } : ok())));
+  assert.equal(canWalkAway(noClaim, TARGETS, false), false);
+  const noRun = applyResults(record, answer(plan(record, TARGETS), (ev) => (ev.id === RUN.id ? { ok: false, message: 'invalid: created_at too early' } : ok())));
+  assert.equal(canWalkAway(noRun, TARGETS, false), false, 'a Claim pointing at a Run no relay holds is not done');
 });
 
 test('Change name: the next Submit or Retry of an existing record publishes the renamed kind-0', () => {

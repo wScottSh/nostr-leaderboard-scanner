@@ -129,6 +129,17 @@ export function submitStatus(record, targets) {
   };
 }
 
+/**
+ * The player can close the page: the Run and the Claim sit on a relay, and
+ * so does the ots-pending, unless there is none to send because stamping
+ * failed or never ran in this page (then the finalizer stamps the Claim).
+ * Not while stamping is still in flight.
+ */
+export function canWalkAway(record, targets, stamping) {
+  const { status, submitted } = submitStatus(record, targets);
+  return submitted && !stamping && (!record.pending || status.pending === 'ok');
+}
+
 // ------------------------------------------------------------- the Claim's timestamp proof
 
 /**

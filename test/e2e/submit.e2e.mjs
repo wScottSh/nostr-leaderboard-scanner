@@ -175,10 +175,10 @@ try {
 
   console.log('2. the relay refused the Run once: its reason shows verbatim, Retry failed resends only that');
   await page.getByText('invalid: created_at too early').waitFor();
-  await page.getByText('Not submitted yet').waitFor();
+  await page.getByText('Not saved yet: no relay accepted the Run').waitFor();
   const before = relay.received.length;
   await page.getByRole('button', { name: 'Retry failed' }).click();
-  await page.getByText('Submitted.').waitFor();
+  await page.getByText('Done. You can close this page. Your Bitcoin timestamp finishes on its own in a few hours.').waitFor();
   assert.deepEqual(relay.received.slice(before).map(({ ev }) => ev.id), [RUN.id], 'retry resent only the failed pair');
   const otsLine = await page.locator('#ots-status').textContent();
   log('ots line:', otsLine);
