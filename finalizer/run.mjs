@@ -24,7 +24,7 @@ import { RELAYS as DEFAULT_RELAYS, queryRelays, publishPairs } from '../src/rela
 import { CALENDARS as DEFAULT_CALENDARS, stampDigest, upgradeOts } from '../src/ots.js';
 import { generateSecretKey, pubkeyOf } from '../src/sign.js';
 import {
-  indexEvents, decide, mergeFiles, pendingCalendars, readiness, finalEvent, pendingEvent,
+  indexEvents, decide, mergeFiles, pendingCalendars, readiness, finalEvent, pendingEvent, runIdOf, STAMPS_PER_PASS,
 } from '../src/finalize.js';
 
 const DAY = 86400;
@@ -83,12 +83,17 @@ async function readRelays(now, pubkey) {
     read('1040', { kinds: [1040], '#k': ['8064'], since: now - 8 * DAY }),
   ]);
   if (recent.includes(null)) return null;
-  const first = indexEvents(recent.flat());
+  const first = [...indexEvents(recent.flat()).values()].filter((entry) => decide(entry, now, pubkey).kind !== 'done');
   // Some relays don't index #k: ask for the 1040s of every Claim not yet done by #e too.
-  const open = [...first].filter(([, entry]) => decide(entry, now, pubkey).kind !== 'done').map(([id]) => id);
-  const byE = await Promise.all(chunks(open, ID_CHUNK).map((ids) => read('1040 by #e', { kinds: [1040], '#e': ids })));
-  if (byE.includes(null)) return null;
-  return indexEvents([...recent.flat(), ...byE.flat()]);
+  const open = first.filter((entry) => entry.claim).map((entry) => entry.claim.id);
+  // A Claim with no proof yet is stamped only if the Run it names is on the relays.
+  const runIds = [...new Set(first.filter((entry) => entry.claim && !entry.pendings.length).map((entry) => runIdOf(entry.claim)))];
+  const more = await Promise.all([
+    ...chunks(open, ID_CHUNK).map((ids) => read('1040 by #e', { kinds: [1040], '#e': ids })),
+    ...chunks(runIds, ID_CHUNK).map((ids) => read('run', { kinds: [8064], ids })),
+  ]);
+  if (more.includes(null)) return null;
+  return indexEvents([...recent.flat(), ...more.flat()]);
 }
 
 /** Publishes one event everywhere -> "accepted k/n" for the log. */
@@ -132,7 +137,10 @@ async function main() {
   log(`${dryRun ? 'dry-run ' : ''}relays=${RELAYS.map(host).join(',')}`, `claims=${entries.size}`,
     `done=${count('done')} upgrade=${count('upgrade')} stamp=${count('stamp')} skip=${count('skip')}`,
     `key=${pubkey ? pubkey.slice(0, 12) : 'none (no 1040 counts as ours)'}`);
-  const queue = [...decisions];
+  const stamps = decisions.filter((d) => d.decision.kind === 'stamp').sort((a, b) => a.entry.claim.created_at - b.entry.claim.created_at);
+  const deferred = new Set(stamps.slice(STAMPS_PER_PASS));
+  if (deferred.size) log(`stamp: ${deferred.size} more Claims over the ${STAMPS_PER_PASS}-per-pass cap; next pass`);
+  const queue = decisions.filter((d) => !deferred.has(d));
   const worker = async () => {
     for (let d = queue.shift(); d; d = queue.shift()) {
       const { id, entry, decision } = d;

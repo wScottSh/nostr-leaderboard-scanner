@@ -3,7 +3,8 @@
  * events alone. Pure: no sockets, no clocks, no calendars (finalizer/run.mjs
  * is the shell).
  *
- * Entry = { claim: Event|null, pendings: Pending[], finals: Event[] }   per Claim id; finals from any author
+ * Entry = { claim: Event|null, run: Event|null, pendings: Pending[], finals: Event[] }   per Claim id;
+ *   run is the Run the Claim names, when it is on the relays and passes checkRun; finals from any author
  * Pending = { event, stamp }   an ots-pending carrier and its parsed proof
  * Decision = { kind: 'done' } | { kind: 'stamp' } | { kind: 'upgrade', files: Uint8Array[] }
  *          | { kind: 'skip', reason }
@@ -12,13 +13,19 @@
  * the exact tag shape the scanner writes. Anything else is dropped.
  */
 import { bytesToHex } from '@noble/hashes/utils.js';
-import { verifyEvent } from './verify.js';
+import { verifyEvent, checkRun } from './verify.js';
 import { signEvent } from './sign.js';
 import {
   parseOts, serializeOts, merge, pruneToBitcoin, bitcoinHeights, bitcoinCalendars, finalTemplate, pendingTemplate, decodeFile,
 } from './ots.js';
 
-export const STAMP_AFTER_S = 120;
+/**
+ * The phone stamps at Submit; the finalizer stamps only Claims still without
+ * a proof this long after. A slow phone's own pending, earlier in calendar
+ * time, then usually lands first.
+ */
+export const STAMP_AFTER_S = 600;
+export const STAMPS_PER_PASS = 20;
 export const PARTIAL_AFTER_S = 12 * 3600;
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -46,6 +53,9 @@ export function parseClaim(ev) {
   return ok ? ev.id : null;
 }
 
+/** The id of the Run a parsed Claim names. */
+export const runIdOf = (claim) => claim.tags[2][1];
+
 /** An ots-pending carrier whose proof stamps the Claim it names -> { claimId, stamp }; else null. */
 export function parsePending(ev) {
   if (ev?.kind !== 8064 || !verifyEvent(ev)) return null;
@@ -69,9 +79,10 @@ export function parseFinal(ev) {
 /** Relay events (any mix, duplicates fine) -> Map<claimId, Entry>. */
 export function indexEvents(events) {
   const entries = new Map();
+  const runs = new Map();
   const seen = new Set();
   const entry = (id) => {
-    if (!entries.has(id)) entries.set(id, { claim: null, pendings: [], finals: [] });
+    if (!entries.has(id)) entries.set(id, { claim: null, run: null, pendings: [], finals: [] });
     return entries.get(id);
   };
   for (const ev of events) {
@@ -89,7 +100,9 @@ export function indexEvents(events) {
     }
     const finalFor = parseFinal(ev);
     if (finalFor) entry(finalFor).finals.push(ev);
+    else if (checkRun(ev).ok) runs.set(ev.id, ev);
   }
+  for (const e of entries.values()) if (e.claim) e.run = runs.get(runIdOf(e.claim)) ?? null;
   return entries;
 }
 
@@ -102,6 +115,7 @@ export function decide(entry, nowSec, finalizerPubkey) {
   if (entry.finals.some((ev) => ev.pubkey === finalizerPubkey)) return { kind: 'done' };
   if (!entry.claim) return { kind: 'skip', reason: 'claim not found' };
   if (entry.pendings.length) return { kind: 'upgrade', files: entry.pendings.map((p) => serializeOts(p.stamp)) };
+  if (!entry.run) return { kind: 'skip', reason: 'run not found' };
   if (nowSec - entry.claim.created_at > STAMP_AFTER_S) return { kind: 'stamp' };
   return { kind: 'skip', reason: 'claim too new to stamp' };
 }

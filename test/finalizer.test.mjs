@@ -80,15 +80,17 @@ test('a walked-away Claim gets exactly one Bitcoin-only 1040, once every stampin
 test('a Claim whose page closed before stamping gets one ots-pending from the finalizer; a dead relay does not fail the run', async () => {
   const [relay, cal] = await Promise.all([startRelay('relay'), startCalendar()]);
   try {
-    const claim = signEvent(claimTemplate(RUN, nowSec() - 300, relay.url), generateSecretKey());
-    const fresh = signEvent(claimTemplate({ ...RUN, id: 'cd'.repeat(32) }, nowSec() - 10, relay.url), generateSecretKey());
-    for (const ev of [claim, fresh]) relay.stored.set(ev.id, ev);
+    const claim = signEvent(claimTemplate(RUN, nowSec() - 900, relay.url), generateSecretKey());
+    const fresh = signEvent(claimTemplate(RUN, nowSec() - 300, relay.url), generateSecretKey());
+    const orphan = signEvent(claimTemplate({ ...RUN, id: 'cd'.repeat(32) }, nowSec() - 900, relay.url), generateSecretKey());
+    for (const ev of [RUN, claim, fresh, orphan]) relay.stored.set(ev.id, ev);
     const env = { relays: [relay.url, 'ws://127.0.0.1:9'], calendars: [cal.url], keyFile: keyFile() };
 
     const dry = await finalize({ ...env, args: ['--dry-run'] });
     assert.equal(dry.code, 0, dry.out);
     assert.match(dry.out, /stamp \w+ dry-run: would stamp/);
     assert.match(dry.out, /skip \w+ claim too new to stamp/);
+    assert.match(dry.out, new RegExp(`skip ${orphan.id.slice(0, 12)} run not found`));
     assert.equal(relay.received.length, 0, 'dry run publishes nothing');
     assert.deepEqual(cal.requests, [], 'dry run never stamps');
 
@@ -101,7 +103,7 @@ test('a Claim whose page closed before stamping gets one ots-pending from the fi
     assert.equal(verifyEvent(pending), true);
     assert.equal(Buffer.from(parseOts(Buffer.from(pending.content, 'base64')).msg).toString('hex'), claim.id);
     assert.deepEqual(pendingCalendars(Buffer.from(pending.content, 'base64')), [cal.url]);
-    assert.ok(!of(relay, isPending).some((ev) => ev.tags.some((t) => t[1] === fresh.id)), 'a Claim under 120 s old is left to its phone');
+    assert.ok(!of(relay, isPending).some((ev) => ev.tags.some((t) => t[1] === fresh.id)), 'a Claim under 10 min old is left to its phone');
 
     run = await finalize(env);
     assert.equal(of(relay, isPending).length, 1, 'the next run upgrades it instead of stamping again');
@@ -125,6 +127,26 @@ test('a pass where a read got no answer from any relay publishes nothing', async
     assert.match(run.out, /abort: no relay answered the ots-pending read/);
     assert.equal(relay.received.length, 0, 'no second ots-pending for a Claim whose pending could not be read');
     assert.equal(cal.requests.length, requests, 'no stamp requested');
+  } finally {
+    await Promise.all([relay.close(), cal.close()]);
+  }
+});
+
+test('fallback stamping is capped at 20 Claims a pass; the rest wait for the next pass', async () => {
+  const [relay, cal] = await Promise.all([startRelay('relay'), startCalendar()]);
+  try {
+    relay.stored.set(RUN.id, RUN);
+    for (let i = 0; i < 23; i += 1) {
+      const claim = signEvent(claimTemplate(RUN, nowSec() - 900 - i, relay.url), generateSecretKey());
+      relay.stored.set(claim.id, claim);
+    }
+    const env = { relays: [relay.url], calendars: [cal.url], keyFile: keyFile() };
+    let run = await finalize(env);
+    assert.equal(run.code, 0, run.out);
+    assert.equal(of(relay, isPending).length, 20);
+    assert.match(run.out, /stamp: 3 more Claims over the 20-per-pass cap; next pass/);
+    run = await finalize(env);
+    assert.equal(of(relay, isPending).length, 23, 'the next pass stamps the rest');
   } finally {
     await Promise.all([relay.close(), cal.close()]);
   }

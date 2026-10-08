@@ -13,7 +13,8 @@ import {
 } from '../src/finalize.js';
 import { claimTemplate } from '../src/claim.js';
 import { signEvent, generateSecretKey, pubkeyOf } from '../src/sign.js';
-import { decodeEvent } from '../src/decode.js';
+import { schnorr } from '@noble/curves/secp256k1.js';
+import { decodeEvent, computeEventId } from '../src/decode.js';
 import { verifyEvent } from '../src/verify.js';
 import { newStamp, applyOp, serializeOts, parseOts, bitcoinHeights, finalTemplate } from '../src/ots.js';
 
@@ -45,12 +46,31 @@ function proof(digestHex, heights, salt = 0) {
   return serializeOts(root);
 }
 
-const decideFor = (events, claimId, now = T0 + 3600) => decide(indexEvents(events).get(claimId) ?? { claim: null, pendings: [], finals: [] }, now, pubkeyOf(finalizer));
+const decideFor = (events, claimId, now = T0 + 3600) => decide(indexEvents([RUN, ...events]).get(claimId) ?? { claim: null, pendings: [], finals: [] }, now, pubkeyOf(finalizer));
 
-test('decide: a Claim with no proof anywhere is stamped once it is over 120 s old', () => {
+test('decide: a Claim with no proof anywhere is stamped once it is over 10 min old', () => {
   const claim = signedClaim();
+  assert.equal(STAMP_AFTER_S, 600);
   assert.deepEqual(decideFor([claim], claim.id, T0 + STAMP_AFTER_S), { kind: 'skip', reason: 'claim too new to stamp' });
   assert.deepEqual(decideFor([claim], claim.id, T0 + STAMP_AFTER_S + 1), { kind: 'stamp' });
+});
+
+test('decide: a Claim is stamped only when its Run is on the relays and passes checkRun', () => {
+  const claim = signedClaim();
+  const now = T0 + 3600;
+  const decideWith = (...events) => decide(indexEvents([claim, ...events]).get(claim.id), now, pubkeyOf(finalizer));
+  assert.deepEqual(decideWith(), { kind: 'skip', reason: 'run not found' });
+  assert.deepEqual(decideWith({ ...RUN, sig: RUN.sig.replace(/^./, (c) => (c === '0' ? '1' : '0')) }), { kind: 'skip', reason: 'run not found' }, 'forged Run');
+  const unsigned = { ...RUN, pubkey: pubkeyOf(claimer), tags: RUN.tags.filter((t) => t[1] !== 'sm64') };
+  const id = computeEventId(unsigned);
+  const notARun = { ...unsigned, id, sig: Buffer.from(schnorr.sign(Buffer.from(id, 'hex'), Buffer.from(claimer, 'hex'))).toString('hex') };
+  assert.equal(verifyEvent(notARun), true);
+  const claimOfNotARun = signEvent(claimTemplate(notARun, T0, 'wss://a'), claimer);
+  assert.deepEqual(decide(indexEvents([claimOfNotARun, notARun]).get(claimOfNotARun.id), now, pubkeyOf(finalizer)),
+    { kind: 'skip', reason: 'run not found' }, 'a signed event that is not a Run');
+  assert.deepEqual(decideWith(RUN), { kind: 'stamp' });
+  const pending = pendingEvent(claim.id, proof(claim.id, { [ALICE]: 0 }), T0, claimer);
+  assert.equal(decideWith(pending).kind, 'upgrade', 'a published proof is upgraded whether or not the Run is found');
 });
 
 test('decide: a Claim with an ots-pending is upgraded from that proof', () => {
