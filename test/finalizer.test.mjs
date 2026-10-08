@@ -151,3 +151,21 @@ test('fallback stamping is capped at 20 Claims a pass; the rest wait for the nex
     await Promise.all([relay.close(), cal.close()]);
   }
 });
+
+test('a Claim in its last day of the 7-day window without our 1040 is logged each pass', async () => {
+  const [relay, cal] = await Promise.all([startRelay('relay'), startCalendar()]);
+  try {
+    const claimer = generateSecretKey();
+    const claims = [nowSec() - 6.5 * 86400, nowSec() - 3600].map((t) => signEvent(claimTemplate(RUN, Math.floor(t), relay.url), claimer));
+    for (const claim of claims) {
+      const { file } = await stampDigest(claim.id, { calendars: [cal.url] });
+      for (const ev of [claim, pendingEvent(claim.id, file, claim.created_at, claimer)]) relay.stored.set(ev.id, ev);
+    }
+    const run = await finalize({ relays: [relay.url], calendars: [cal.url], keyFile: keyFile() });
+    assert.equal(run.code, 0, run.out);
+    assert.match(run.out, new RegExp(`expiring ${claims[0].id.slice(0, 12)} 156 h old, no 1040 yet; leaves the 7-day window in 12 h`));
+    assert.doesNotMatch(run.out, new RegExp(`expiring ${claims[1].id.slice(0, 12)}`));
+  } finally {
+    await Promise.all([relay.close(), cal.close()]);
+  }
+});

@@ -28,6 +28,7 @@ import {
 } from '../src/finalize.js';
 
 const DAY = 86400;
+const WINDOW = 7 * DAY;
 const ID_CHUNK = 100;
 const CONCURRENCY = 8;
 const READ = { timeoutMs: 15_000 };
@@ -78,9 +79,9 @@ async function read(what, filter) {
 /** Every recent Claim's entry, or null if any read went unanswered. */
 async function readRelays(now, pubkey) {
   const recent = await Promise.all([
-    read('claim', { kinds: [8064], '#t': ['claim'], since: now - 7 * DAY }),
-    read('ots-pending', { kinds: [8064], '#t': ['ots-pending'], since: now - 7 * DAY }),
-    read('1040', { kinds: [1040], '#k': ['8064'], since: now - 8 * DAY }),
+    read('claim', { kinds: [8064], '#t': ['claim'], since: now - WINDOW }),
+    read('ots-pending', { kinds: [8064], '#t': ['ots-pending'], since: now - WINDOW }),
+    read('1040', { kinds: [1040], '#k': ['8064'], since: now - WINDOW - DAY }),
   ]);
   if (recent.includes(null)) return null;
   const first = [...indexEvents(recent.flat()).values()].filter((entry) => decide(entry, now, pubkey).kind !== 'done');
@@ -137,6 +138,12 @@ async function main() {
   log(`${dryRun ? 'dry-run ' : ''}relays=${RELAYS.map(host).join(',')}`, `claims=${entries.size}`,
     `done=${count('done')} upgrade=${count('upgrade')} stamp=${count('stamp')} skip=${count('skip')}`,
     `key=${pubkey ? pubkey.slice(0, 12) : 'none (no 1040 counts as ours)'}`);
+  for (const { id, entry, decision } of decisions) {
+    const age = entry.claim && now - entry.claim.created_at;
+    if (age > WINDOW - DAY && decision.kind !== 'done') {
+      log('expiring', short(id), `${Math.floor(age / 3600)} h old, no 1040 yet; leaves the 7-day window in ${Math.ceil((WINDOW - age) / 3600)} h`);
+    }
+  }
   const stamps = decisions.filter((d) => d.decision.kind === 'stamp').sort((a, b) => a.entry.claim.created_at - b.entry.claim.created_at);
   const deferred = new Set(stamps.slice(STAMPS_PER_PASS));
   if (deferred.size) log(`stamp: ${deferred.size} more Claims over the ${STAMPS_PER_PASS}-per-pass cap; next pass`);
