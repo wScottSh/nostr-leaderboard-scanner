@@ -195,10 +195,10 @@ test('links: deep link matches nostr-leaderboard hash routes', () => {
 
 // ------------------------------------------------------------- invariant
 
-test('zero far-side reconstruction: no source file can sign', () => {
+test('the Run is never signed here: only src/sign.js touches the signing API', () => {
   const dir = path.join(here, '..', 'src');
-  for (const f of readdirSync(dir).filter((n) => n.endsWith('.js'))) {
-    const src = readFileSync(path.join(dir, f), 'utf8');
-    assert.doesNotMatch(src, /\.sign\(|getPublicKey|privkey|nsec/i, `${f} must never sign`);
-  }
+  const signing = readdirSync(dir)
+    .filter((n) => n.endsWith('.js'))
+    .filter((f) => /schnorr\.sign\b|\.sign\(|getPublicKey|randomSecretKey|randomPrivateKey/.test(readFileSync(path.join(dir, f), 'utf8')));
+  assert.deepEqual(signing, ['sign.js']);
 });

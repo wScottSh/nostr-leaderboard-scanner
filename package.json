@@ -12,9 +12,12 @@
   "dependencies": {
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
+    "@scure/base": "^2.4.0",
     "jsqr": "^1.4.0"
   },
   "devDependencies": {
-    "esbuild": "^0.28.2"
+    "esbuild": "^0.28.2",
+    "playwright-core": "^1.64.0",
+    "ws": "^8.22.0"
   }
 }
