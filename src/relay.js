@@ -1,40 +1,64 @@
 /*
- * relay.js -- NIP-01 publish: open each relay, send ["EVENT", ev], wait for
- * its ["OK", id, accepted, message]. The relay list is the leaderboard's own
- * defaults (nostr-leaderboard src/relay.js), so every scan lands where the
- * leaderboard looks. Fixed on purpose: a relay taken from the URL would let a
- * crafted link redirect the broadcast.
+ * relay.js -- NIP-01 over WebSockets: publish signed events, and read
+ * kind-0 profiles.
+ *
+ * RELAYS is the leaderboard's own default list (nostr-leaderboard
+ * src/relay.js), so every Submit lands where the leaderboard looks; INDEXERS
+ * are the profile indexers a name is looked up on and a generated key's
+ * kind-0 is also sent to. Both are fixed in code on purpose: a relay taken
+ * from the URL would let a crafted link redirect the broadcast. The only
+ * override is at build time (SCANNER_RELAYS / SCANNER_INDEXERS in
+ * scripts/build.mjs), for a local end-to-end run.
  */
 
-export const RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net'];
+/* global __SCANNER_RELAYS__, __SCANNER_INDEXERS__ */
+export const RELAYS = typeof __SCANNER_RELAYS__ !== 'undefined'
+  ? __SCANNER_RELAYS__
+  : ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net'];
+
+export const INDEXERS = typeof __SCANNER_INDEXERS__ !== 'undefined'
+  ? __SCANNER_INDEXERS__
+  : ['wss://purplepag.es', 'wss://user.kindpag.es'];
 
 /**
- * publishToRelay: resolves { relay, ok, message } on OK, error, close, or
- * timeout. Never rejects. A relay that already has the event answers
- * OK true ("duplicate:"), so re-scanning the same QR is harmless.
+ * publishToRelay: sends every event over one socket and matches each
+ * ["OK", id, accepted, message] by id. Resolves one { relay, eventId, ok,
+ * message } per event once all have answered, or on error, close, or
+ * timeout (unanswered events then fail with that reason). Never rejects. A
+ * relay that already has an event answers OK true ("duplicate:"), so
+ * resending a stored event is harmless.
  */
-export function publishToRelay(url, event, { timeoutMs = 10000, WebSocketImpl = globalThis.WebSocket } = {}) {
+export function publishToRelay(url, events, { timeoutMs = 10000, WebSocketImpl = globalThis.WebSocket, onResult = () => {} } = {}) {
   return new Promise((resolve) => {
-    let settled = false;
+    const results = new Map();
     let ws;
-    const done = (ok, message) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      try {
-        ws.close();
-      } catch { /* already closed */ }
-      resolve({ relay: url, ok, message });
+    let done = false;
+    const record = (eventId, ok, message) => {
+      if (results.has(eventId)) return;
+      const r = { relay: url, eventId, ok, message };
+      results.set(eventId, r);
+      onResult(r);
     };
-    const timer = setTimeout(() => done(false, 'timed out'), timeoutMs);
+    const finish = (reason) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      for (const ev of events) record(ev.id, false, reason);
+      try {
+        ws?.close();
+      } catch { /* already closed */ }
+      resolve(events.map((ev) => results.get(ev.id)));
+    };
+    const timer = setTimeout(() => finish('timed out'), timeoutMs);
     try {
       ws = new WebSocketImpl(url);
     } catch (e) {
-      clearTimeout(timer);
-      resolve({ relay: url, ok: false, message: String(e.message || e) });
+      finish(String(e.message || e));
       return;
     }
-    ws.onopen = () => ws.send(JSON.stringify(['EVENT', event]));
+    ws.onopen = () => {
+      for (const ev of events) ws.send(JSON.stringify(['EVENT', ev]));
+    };
     ws.onmessage = (msg) => {
       let data;
       try {
@@ -42,21 +66,74 @@ export function publishToRelay(url, event, { timeoutMs = 10000, WebSocketImpl = 
       } catch {
         return;
       }
-      if (Array.isArray(data) && data[0] === 'OK' && data[1] === event.id) done(data[2] === true, data[3] || '');
+      if (!Array.isArray(data) || data[0] !== 'OK' || !events.some((ev) => ev.id === data[1])) return;
+      record(data[1], data[2] === true, data[3] || '');
+      if (results.size === events.length) finish('');
     };
-    ws.onerror = () => done(false, 'connection error');
-    ws.onclose = () => done(false, 'connection closed');
+    ws.onerror = () => finish('connection error');
+    ws.onclose = () => finish('connection closed');
   });
 }
 
-/** Publish to every relay in parallel; onResult fires as each one answers. */
-export function publishAll(urls, event, onResult = () => {}, opts) {
-  return Promise.all(
-    urls.map((u) =>
-      publishToRelay(u, event, opts).then((r) => {
-        onResult(r);
-        return r;
-      }),
-    ),
-  );
+/** Publish (event, relay) pairs: one socket per relay, all relays in parallel. Resolves the flat results. */
+export async function publishPairs(pairs, onResult = () => {}, opts = {}) {
+  const byRelay = new Map();
+  for (const { event, relay } of pairs) byRelay.set(relay, [...(byRelay.get(relay) ?? []), event]);
+  const all = await Promise.all([...byRelay].map(([relay, events]) => publishToRelay(relay, events, { ...opts, onResult })));
+  return all.flat();
 }
+
+/**
+ * queryRelays: REQ filter on every relay, collecting events until each
+ * sends EOSE, fails, or times out -> { events, answered }, where answered
+ * counts the relays that reached EOSE. Never rejects; unreachable relays
+ * just contribute nothing, so answered is how a caller tells "no events"
+ * from "nobody replied".
+ */
+export async function queryRelays(urls, filter, { timeoutMs = 5000, WebSocketImpl = globalThis.WebSocket } = {}) {
+  const perRelay = await Promise.all(urls.map((url) => new Promise((resolve) => {
+    const events = [];
+    let eose = false;
+    let ws;
+    let done = false;
+    const sub = 'scan';
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        ws?.send(JSON.stringify(['CLOSE', sub]));
+        ws?.close();
+      } catch { /* already closed */ }
+      resolve({ events, eose });
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    try {
+      ws = new WebSocketImpl(url);
+    } catch {
+      finish();
+      return;
+    }
+    ws.onopen = () => ws.send(JSON.stringify(['REQ', sub, filter]));
+    ws.onmessage = (msg) => {
+      let data;
+      try {
+        data = JSON.parse(msg.data);
+      } catch {
+        return;
+      }
+      if (done || !Array.isArray(data) || data[1] !== sub) return;
+      if (data[0] === 'EVENT' && data[2] && typeof data[2] === 'object') events.push(data[2]);
+      else if (data[0] === 'EOSE' || data[0] === 'CLOSED') {
+        eose = data[0] === 'EOSE';
+        finish();
+      }
+    };
+    ws.onerror = finish;
+    ws.onclose = finish;
+  })));
+  return { events: perRelay.flatMap((r) => r.events), answered: perRelay.filter((r) => r.eose).length };
+}
+
+/** queryRelays' events alone, for reads where silence is just "nothing found". */
+export const fetchEvents = async (urls, filter, opts) => (await queryRelays(urls, filter, opts)).events;

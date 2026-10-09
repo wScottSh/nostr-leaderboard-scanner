@@ -95,3 +95,12 @@ pre {
   background: rgba(0, 0, 0, 0.35); padding: 8px; border-radius: 6px; margin: 6px 0 0;
 }
 footer { max-width: 560px; margin: 0 auto; padding: 20px 16px 40px; color: var(--muted); font-size: 12px; text-align: center; }
+
+/* Submit step: functional placeholders until the UI is designed. */
+button:disabled { opacity: 0.5; cursor: default; }
+.field {
+  width: 100%; font: inherit; padding: 10px 12px; border-radius: 10px;
+  border: 2px solid var(--line); background: var(--panel-2); color: var(--text);
+}
+.bad-text { color: var(--red); }
+.claim { border-bottom: 1px solid var(--line); padding: 4px 0 8px; }

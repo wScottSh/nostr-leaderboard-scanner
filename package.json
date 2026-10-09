@@ -2,19 +2,25 @@
   "name": "nostr-leaderboard-scanner",
   "private": true,
   "type": "module",
-  "description": "Phone scanner for sm64-nostr cabinet star QRs; publishes the signed run to nostr-leaderboard's relays.",
+  "description": "Phone scanner for sm64-nostr cabinet star QRs; submits the signed run and the player's Claim to nostr-leaderboard's relays.",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "build:finalizer": "esbuild finalizer/run.mjs --bundle --platform=node --format=esm --target=node22 --minify --outfile=dist-finalizer/finalizer.mjs",
     "dev": "node scripts/build.mjs --serve",
     "test": "node --test test/*.test.mjs",
-    "sync-contract": "node scripts/sync-contract.mjs"
+    "sync-contract": "node scripts/sync-contract.mjs",
+    "e2e": "node test/e2e/submit.e2e.mjs",
+    "finalize": "node finalizer/run.mjs"
   },
   "dependencies": {
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
+    "@scure/base": "^2.4.0",
     "jsqr": "^1.4.0"
   },
   "devDependencies": {
-    "esbuild": "^0.28.2"
+    "esbuild": "^0.28.2",
+    "playwright-core": "^1.64.0",
+    "ws": "^8.22.0"
   }
 }
